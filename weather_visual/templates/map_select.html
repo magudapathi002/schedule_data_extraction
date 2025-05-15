@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Select Location</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+</head>
+<body>
+    <h2>Select a Location</h2>
+    <div id="map" style="height: 500px;"></div>
+
+    <script>
+        const map = L.map('map').setView([20, 78], 5);  // Center of India
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '&copy; OpenStreetMap contributors'
+        }).addTo(map);
+
+        map.on('click', function(e) {
+            const lat = e.latlng.lat;
+            const lon = e.latlng.lng;
+            window.location.href = `/wind-hourly-data/?lat=${lat}&lon=${lon}`;
+        });
+    </script>
+</body>
+</html>

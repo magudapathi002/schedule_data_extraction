@@ -1,22 +1,32 @@
 import os
+
+import pandas as pd
 import requests
 import numpy as np
 import xarray as xr
 from celery import shared_task
 from .models import WindData10m
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
-@shared_task
-def sharedtask():
-    print("shared task")
-    return 'hiiii'
 
 @shared_task
 def download_all_file_grib_file():
     base_url = "https://nomads.ncep.noaa.gov/cgi-bin/filter_gfs_0p25.pl"
-    run_date = "20250514"
-    cycle = "06"
+    run_date = "20250515"
+    cycle = "00"
     save_dir = "grib_data"
     os.makedirs(save_dir, exist_ok=True)
+
+    # Setup retry session
+    session = requests.Session()
+    retries = Retry(
+        total=5,
+        backoff_factor=2,
+        status_forcelist=[429, 500, 502, 503, 504],
+        allowed_methods=["GET"]
+    )
+    session.mount("https://", HTTPAdapter(max_retries=retries))
 
     # Forecast hours: 0-120 hourly + 123 to 384 every 3 hours
     forecast_hours = list(range(0, 121)) + list(range(123, 385, 3))
@@ -38,16 +48,21 @@ def download_all_file_grib_file():
         }
 
         print(f"Downloading {filename}...")
-        response = requests.get(base_url, params=params, stream=True)
-        if response.status_code == 200:
-            out_path = os.path.join(save_dir, filename)
-            with open(out_path, "wb") as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    f.write(chunk)
-            print(f"Saved {filename}")
-        else:
-            print(f"Failed to download {filename}: HTTP {response.status_code}")
+        try:
+            response = session.get(base_url, params=params, stream=True, timeout=60)
+            if response.status_code == 200:
+                out_path = os.path.join(save_dir, filename)
+                with open(out_path, "wb") as f:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        f.write(chunk)
+                print(f"Saved {filename}")
+            else:
+                print(f"Failed to download {filename}: HTTP {response.status_code}")
+        except Exception as e:
+            print(f"⚠️ Error downloading {filename}: {e}")
+
     print('all files is downloaded')
+
     # ⏩ Now trigger the extraction task
     extract_and_store_wind_data.delay()
 
@@ -62,25 +77,60 @@ def extract_and_store_wind_data():
     for file in files:
         path = os.path.join(data_dir, file)
         try:
-            ds = xr.open_dataset(path, engine="cfgrib", filter_by_keys={"typeOfLevel": "heightAboveGround", "level": 10})
-            ugrd = ds['u10'] if 'u10' in ds else ds['u']
-            vgrd = ds['v10'] if 'v10' in ds else ds['v']
+            ds = xr.open_dataset(
+                path,
+                engine="cfgrib",
+                filter_by_keys={"typeOfLevel": "heightAboveGround", "level": 10},
+                backend_kwargs={"decode_timedelta": True}
+            )
+
+            # Retrieve wind components (try u10/v10 first, then fallback to u/v)
+            if 'u10' in ds and 'v10' in ds:
+                ugrd = ds['u10']
+                vgrd = ds['v10']
+            elif 'u' in ds and 'v' in ds:
+                ugrd = ds['u']
+                vgrd = ds['v']
+            else:
+                raise KeyError("Missing wind components (u10/v10 or u/v)")
 
             wind_speed = np.sqrt(ugrd**2 + vgrd**2)
             latitudes = ds.latitude.values
             longitudes = ds.longitude.values
-            valid_time = ds.time.values[0] + ds.step.values[0]
+
+            # Safely extract valid_time
+            time_val = ds.time.values
+            if isinstance(time_val, np.ndarray):
+                time_val = time_val[0]
+
+            step_val = ds.step.values
+            if isinstance(step_val, np.ndarray):
+                step_val = step_val[0]
+
+            # Convert to Python datetime to avoid fromisoformat errors
+            valid_time = pd.to_datetime(time_val + step_val).to_pydatetime()
+
+            wind_data_entries = []
+            shape = wind_speed.shape
 
             for lat_idx, lat in enumerate(latitudes):
                 for lon_idx, lon in enumerate(longitudes):
-                    WindData10m.objects.create(
+                    # Handle both 2D and 3D arrays
+                    if len(shape) == 3:
+                        ws_value = round(float(wind_speed[0, lat_idx, lon_idx]), 2)
+                    elif len(shape) == 2:
+                        ws_value = round(float(wind_speed[lat_idx, lon_idx]), 2)
+                    else:
+                        raise ValueError(f"Unexpected wind_speed shape: {shape}")
+
+                    wind_data_entries.append(WindData10m(
                         valid_time=valid_time,
                         latitude=float(lat),
                         longitude=float(lon),
-                        wind_speed=float(wind_speed[0, lat_idx, lon_idx])
-                    )
-
-            print(f"✅ Parsed and saved from: {file}")
+                        wind_speed=ws_value
+                    ))
+            WindData10m.objects.bulk_create(wind_data_entries)
+            print(f"✅ Parsed and saved from: {file} ({len(wind_data_entries)} records)")
 
         except Exception as e:
             print(f"⚠️ Error processing {file}: {e}")

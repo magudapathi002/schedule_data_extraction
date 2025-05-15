@@ -19,5 +19,6 @@ from django.urls import path, include
 
 urlpatterns = [
     # path('admin/', admin.site.urls),
-    path('home/', include('forecast_process.urls'), name='forecast_process')
+    path('home/', include('forecast_process.urls'), name='forecast_process'),
+    path('finder/',include('weather_visual.urls'),name='weather_visual')
 ]

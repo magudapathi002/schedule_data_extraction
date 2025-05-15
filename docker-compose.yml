@@ -4,37 +4,42 @@ services:
   redis:
     image: redis:7.0.11-alpine
     container_name: redis
+
   django:
     container_name: django
     build:
-      context: ./
+      context: .
     command: python manage.py runserver 0.0.0.0:8000
     volumes:
-      - ./weather_data_process:/usr/src/app
+      - .:/usr/src/app
     ports:
       - "8001:8000"
     env_file:
       - .env
     depends_on:
       - redis
+
   celery:
     container_name: celery
     build:
-      context: ./
+      context: .
     command: celery --app=weather_data_process worker -l INFO
     volumes:
-      - ./weather_data_process:/usr/src/app
+      - .:/usr/src/app
     env_file:
       - .env
     depends_on:
       - redis
+
   beat:
     container_name: beat
     build:
-      context: ./
+      context: .
     command: celery -A weather_data_process beat -l info --scheduler django_celery_beat.schedulers:DatabaseScheduler
     volumes:
-      - ./weather_data_process:/usr/src/app
+      - .:/usr/src/app
+    env_file:
+      - .env
     depends_on:
       - redis
       - django
