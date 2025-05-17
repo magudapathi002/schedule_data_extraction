@@ -73,8 +73,12 @@ WSGI_APPLICATION = 'weather_data_process.wsgi.application'
 
 DATABASES = {
     'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
+        'ENGINE': 'django.db.backends.mysql',
+        'NAME': os.environ.get('MYSQL_DATABASE', 'forecast_data'),
+        'USER': 'root',
+        'HOST': 'host.docker.internal',
+        'PASSWORD': 'qwerty@123',
+        'PORT': '3306',
     }
 }
 

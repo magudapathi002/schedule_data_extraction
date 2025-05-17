@@ -5,7 +5,7 @@ import requests
 import numpy as np
 import xarray as xr
 from celery import shared_task
-from .models import WindData10m
+from .models import WindData10m,WindDataInterpolated
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
@@ -131,6 +131,52 @@ def extract_and_store_wind_data():
                     ))
             WindData10m.objects.bulk_create(wind_data_entries)
             print(f"✅ Parsed and saved from: {file} ({len(wind_data_entries)} records)")
-
         except Exception as e:
             print(f"⚠️ Error processing {file}: {e}")
+    interpolate_and_store_wind_data_15min.delay()
+
+@shared_task
+def interpolate_and_store_wind_data_15min():
+    # Get all unique lat/lon pairs from raw data
+    locations = WindData10m.objects.values('latitude', 'longitude').distinct()
+
+    for loc in locations:
+        lat = loc['latitude']
+        lon = loc['longitude']
+
+        # Fetch all wind data for this lat/lon ordered by time
+        qs = WindData10m.objects.filter(latitude=lat, longitude=lon).order_by('valid_time')
+
+        if qs.count() < 2:
+            # Not enough data points to interpolate
+            continue
+
+        # Convert to DataFrame
+        df = pd.DataFrame.from_records(qs.values('valid_time', 'wind_speed'))
+        df['valid_time'] = pd.to_datetime(df['valid_time'])
+        df.set_index('valid_time', inplace=True)
+
+        # Create new time index with 15-minute frequency
+        new_time_index = pd.date_range(start=df.index.min(), end=df.index.max(), freq='15T')
+        df_15min = df.reindex(new_time_index)
+
+        # Interpolate missing values linearly
+        df_15min['wind_speed'] = df_15min['wind_speed'].interpolate(method='time')
+
+        # Prepare list for bulk insert
+        interpolated_entries = []
+        for time_val, row in df_15min.iterrows():
+            interpolated_entries.append(WindDataInterpolated(
+                valid_time=time_val.to_pydatetime(),
+                latitude=lat,
+                longitude=lon,
+                wind_speed=row['wind_speed']
+            ))
+
+        # Bulk insert into DB (you can delete previous interpolated entries if you want to overwrite)
+        WindDataInterpolated.objects.filter(latitude=lat, longitude=lon).delete()
+        WindDataInterpolated.objects.bulk_create(interpolated_entries)
+
+        print(f"Interpolated and saved data for lat: {lat}, lon: {lon} ({len(interpolated_entries)} records)")
+
+    print("✅ All locations processed.")

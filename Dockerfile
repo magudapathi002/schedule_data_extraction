@@ -6,13 +6,24 @@ WORKDIR /usr/src/app
 ENV PYTHONDONTWRITEBYTECODE 1
 ENV PYTHONUNBUFFERED 1
 
-RUN apt-get update && apt-get install -y gcc g++ libeccodes0 libeccodes-dev && rm -rf /var/lib/apt/lists/*
-RUN pip install --upgrade pip
+# Install system packages first
+RUN apt-get update && apt-get install -y \
+    gcc \
+    g++ \
+    libeccodes0 \
+    libeccodes-dev \
+    libmariadb-dev \
+    pkg-config \
+    build-essential \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
 
+# Upgrade pip and install wheel
+RUN pip install --upgrade pip wheel
+
+# Copy requirements and install Python packages
 COPY requirements.txt .
 RUN pip install -r requirements.txt
 
-#COPY entrypoint.sh .
+# Copy app code
 COPY . .
-
-#ENTRYPOINT ["/usr/src/app/entrypoint.sh"]
