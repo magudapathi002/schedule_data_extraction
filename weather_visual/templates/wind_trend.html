@@ -1,48 +1,148 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
+    <meta charset="UTF-8">
     <title>Wind Speed Trend</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background-color: #f4f7f9;
+            padding: 20px;
+        }
+        h2 {
+            text-align: center;
+        }
+        .chart-container {
+            width: 90%;
+            max-width: 1200px;
+            margin: auto;
+        }
+        .controls {
+            text-align: center;
+            margin: 20px 0;
+        }
+    </style>
 </head>
 <body>
-    <h2>Wind Speed Trend for Location: {{ location }}</h2>
-    <canvas id="windChart" width="800" height="400"></canvas>
+
+    <h2>Wind Speed Trend - Location: {{ location }}</h2>
+
+    <!-- Controls: Day and Interval Selector -->
+    <div class="controls">
+        <label for="daySelect" style="margin-right: 10px;">Select Day:</label>
+        <select id="daySelect" style="padding: 6px; margin-right: 30px;"></select>
+
+        <label for="intervalSelect" style="margin-right: 10px;">Interval:</label>
+        <select id="intervalSelect" style="padding: 6px;">
+            <option value="15">Every 15 Minutes</option>
+            <option value="60">Every Hour</option>
+        </select>
+    </div>
+
+    <!-- Chart -->
+    <div class="chart-container">
+        <canvas id="windChart"></canvas>
+    </div>
 
     <script>
-        const ctx = document.getElementById('windChart').getContext('2d');
-        const windChart = new Chart(ctx, {
-            type: 'line',
-            data: {
-                labels: {{ labels|safe }},
-                datasets: [{
-                    label: 'Wind Speed (m/s)',
-                    data: {{ values|safe }},
-                    borderColor: 'rgba(75, 192, 192, 1)',
-                    borderWidth: 2,
-                    fill: false,
-                    tension: 0.3,
-                    pointRadius: 2
-                }]
-            },
-            options: {
-                responsive: true,
-                scales: {
-                    x: {
-                        title: {
-                            display: true,
-                            text: 'Time'
-                        }
-                    },
-                    y: {
-                        title: {
-                            display: true,
-                            text: 'Wind Speed (m/s)'
-                        },
-                        beginAtZero: true
-                    }
+        const dataByDay = {{ data_by_day|safe }};
+        const days = {{ days|safe }};
+        const ctx = document.getElementById("windChart").getContext("2d");
+
+        const daySelect = document.getElementById("daySelect");
+        const intervalSelect = document.getElementById("intervalSelect");
+
+        days.forEach(day => {
+            const option = document.createElement("option");
+            option.value = day;
+            option.textContent = day;
+            daySelect.appendChild(option);
+        });
+
+        let windChart = null;
+
+        function filterByInterval(times, speeds, intervalMinutes) {
+            const filteredTimes = [];
+            const filteredSpeeds = [];
+
+            let lastIncluded = null;
+
+            for (let i = 0; i < times.length; i++) {
+                const time = new Date("1970-01-01T" + times[i] + "Z");  // UTC time parsing
+                if (!lastIncluded || (time - lastIncluded) >= intervalMinutes * 60 * 1000) {
+                    filteredTimes.push(times[i]);
+                    filteredSpeeds.push(speeds[i]);
+                    lastIncluded = time;
                 }
             }
+            return { times: filteredTimes, speeds: filteredSpeeds };
+        }
+
+        function drawChart(day, interval) {
+            const rawData = dataByDay[day];
+            const filtered = filterByInterval(rawData["times"], rawData["speeds"], parseInt(interval));
+
+            if (windChart) windChart.destroy();
+
+            windChart = new Chart(ctx, {
+                type: "line",
+                data: {
+                    labels: filtered.times,
+                    datasets: [{
+                        label: "Wind Speed (m/s)",
+                        data: filtered.speeds,
+                        borderColor: "rgba(54, 162, 235, 1)",
+                        backgroundColor: "rgba(54, 162, 235, 0.2)",
+                        tension: 0.3,
+                        fill: true,
+                        pointRadius: 1.5
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    scales: {
+                        x: {
+                            title: { display: true, text: "Time of Day" },
+                            ticks: {
+                                autoSkip: false,
+                                maxRotation: 60,
+                                minRotation: 45
+                            }
+                        },
+                        y: {
+                            beginAtZero: true,
+                            title: { display: true, text: "Wind Speed (m/s)" }
+                        }
+                    },
+                    plugins: {
+                        tooltip: {
+                            callbacks: {
+                                label: function (context) {
+                                    return context.dataset.label + ": " + parseFloat(context.parsed.y).toFixed(2) + " m/s";
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        // Initial chart
+        if (days.length > 0) {
+            drawChart(days[0], intervalSelect.value);
+            daySelect.value = days[0];
+        }
+
+        // Event listeners
+        daySelect.addEventListener("change", function () {
+            drawChart(this.value, intervalSelect.value);
+        });
+
+        intervalSelect.addEventListener("change", function () {
+            drawChart(daySelect.value, this.value);
         });
     </script>
+
 </body>
 </html>

@@ -5,7 +5,10 @@ import requests
 import numpy as np
 import xarray as xr
 from celery import shared_task
-from .models import WindData10m,WindDataInterpolated
+from django.db import transaction
+from scipy.interpolate import griddata, PchipInterpolator
+
+from .models import WindData10m, WindDataInterpolated, WindDataSpatialInterpolated
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
@@ -13,7 +16,7 @@ from urllib3.util.retry import Retry
 @shared_task
 def download_all_file_grib_file():
     base_url = "https://nomads.ncep.noaa.gov/cgi-bin/filter_gfs_0p25.pl"
-    run_date = "20250515"
+    run_date = "20250521"
     cycle = "00"
     save_dir = "grib_data"
     os.makedirs(save_dir, exist_ok=True)
@@ -40,10 +43,10 @@ def download_all_file_grib_file():
             "var_UGRD": "on",
             "var_VGRD": "on",
             "subregion": "",
-            "toplat": 13.09,
-            "leftlon": 76.22,
-            "rightlon": 80.4,
-            "bottomlat": 8.02,
+            "toplat": 11.52,
+            "leftlon": 76.39,
+            "rightlon": 77.29,
+            "bottomlat": 10.37,
             "dir": f"/gfs.{run_date}/{cycle}/atmos"
         }
 
@@ -94,7 +97,7 @@ def extract_and_store_wind_data():
             else:
                 raise KeyError("Missing wind components (u10/v10 or u/v)")
 
-            wind_speed = np.sqrt(ugrd**2 + vgrd**2)
+            wind_speed = np.sqrt(ugrd ** 2 + vgrd ** 2)
             latitudes = ds.latitude.values
             longitudes = ds.longitude.values
 
@@ -135,48 +138,162 @@ def extract_and_store_wind_data():
             print(f"⚠️ Error processing {file}: {e}")
     interpolate_and_store_wind_data_15min.delay()
 
+
+# @shared_task
+# def interpolate_and_store_wind_data_15min():
+#     # Get all unique lat/lon pairs from raw data
+#     locations = WindData10m.objects.values('latitude', 'longitude').distinct()
+#
+#     for loc in locations:
+#         lat = loc['latitude']
+#         lon = loc['longitude']
+#
+#         # Fetch all wind data for this lat/lon ordered by time
+#         qs = WindData10m.objects.filter(latitude=lat, longitude=lon).order_by('valid_time')
+#
+#         if qs.count() < 2:
+#             # Not enough data points to interpolate
+#             continue
+#
+#         # Convert to DataFrame
+#         df = pd.DataFrame.from_records(qs.values('valid_time', 'wind_speed'))
+#         df['valid_time'] = pd.to_datetime(df['valid_time'])
+#         df.set_index('valid_time', inplace=True)
+#
+#         # Create new time index with 15-minute frequency
+#         new_time_index = pd.date_range(start=df.index.min(), end=df.index.max(), freq='15T')
+#         df_15min = df.reindex(new_time_index)
+#
+#         # Interpolate missing values linearly
+#         df_15min['wind_speed'] = df_15min['wind_speed'].interpolate(method='time')
+#
+#         # Prepare list for bulk insert
+#         interpolated_entries = []
+#         for time_val, row in df_15min.iterrows():
+#             interpolated_entries.append(WindDataInterpolated(
+#                 valid_time=time_val.to_pydatetime(),
+#                 latitude=lat,
+#                 longitude=lon,
+#                 wind_speed=row['wind_speed']
+#             ))
+#
+#         # Bulk insert into DB (you can delete previous interpolated entries if you want to overwrite)
+#         WindDataInterpolated.objects.filter(latitude=lat, longitude=lon).delete()
+#         WindDataInterpolated.objects.bulk_create(interpolated_entries)
+#
+#         print(f"Interpolated and saved data for lat: {lat}, lon: {lon} ({len(interpolated_entries)} records)")
+#
+#     print("✅ All locations processed.")
+
+# Optional: use this helper for batching
+def chunked(iterable, size):
+    for i in range(0, len(iterable), size):
+        yield iterable[i:i + size]
+
+
 @shared_task
 def interpolate_and_store_wind_data_15min():
-    # Get all unique lat/lon pairs from raw data
-    locations = WindData10m.objects.values('latitude', 'longitude').distinct()
+    # Get all unique lat/lon pairs
+    locations = WindData10m.objects.values_list('latitude', 'longitude').distinct()
 
-    for loc in locations:
-        lat = loc['latitude']
-        lon = loc['longitude']
+    for lat, lon in locations:
+        # Efficient queryset and streaming
+        qs = WindData10m.objects.filter(latitude=lat, longitude=lon).only("valid_time", "wind_speed").order_by("valid_time").iterator()
 
-        # Fetch all wind data for this lat/lon ordered by time
-        qs = WindData10m.objects.filter(latitude=lat, longitude=lon).order_by('valid_time')
-
-        if qs.count() < 2:
-            # Not enough data points to interpolate
-            continue
+        data = [(obj.valid_time, obj.wind_speed) for obj in qs]
+        if len(data) < 4:
+            continue  # PCHIP needs at least 4 points
 
         # Convert to DataFrame
-        df = pd.DataFrame.from_records(qs.values('valid_time', 'wind_speed'))
+        df = pd.DataFrame(data, columns=['valid_time', 'wind_speed'])
         df['valid_time'] = pd.to_datetime(df['valid_time'])
         df.set_index('valid_time', inplace=True)
 
-        # Create new time index with 15-minute frequency
+        # Optional: apply smoothing
+        df['wind_speed'] = df['wind_speed'].rolling(window=3, min_periods=1, center=True).mean()
+
+        # Create new 15-min index
         new_time_index = pd.date_range(start=df.index.min(), end=df.index.max(), freq='15T')
-        df_15min = df.reindex(new_time_index)
 
-        # Interpolate missing values linearly
-        df_15min['wind_speed'] = df_15min['wind_speed'].interpolate(method='time')
+        # Use PCHIP interpolation directly
+        interp = PchipInterpolator(df.index.astype(int) / 1e9, df['wind_speed'])  # seconds since epoch
+        interpolated_values = interp(new_time_index.astype(int) / 1e9)
 
-        # Prepare list for bulk insert
-        interpolated_entries = []
-        for time_val, row in df_15min.iterrows():
-            interpolated_entries.append(WindDataInterpolated(
-                valid_time=time_val.to_pydatetime(),
+        # Prepare bulk data
+        interpolated_entries = [
+            WindDataInterpolated(
+                valid_time=ts.to_pydatetime(),
                 latitude=lat,
                 longitude=lon,
-                wind_speed=row['wind_speed']
+                wind_speed=round(float(ws), 2)
+            )
+            for ts, ws in zip(new_time_index, interpolated_values)
+            if not pd.isnull(ws)
+        ]
+
+        # Remove old entries and insert new ones in chunks
+        WindDataInterpolated.objects.filter(latitude=lat, longitude=lon).delete()
+        for chunk in chunked(interpolated_entries, 1000):
+            with transaction.atomic():
+                WindDataInterpolated.objects.bulk_create(chunk, batch_size=1000)
+
+        print(f"✅ Interpolated and stored data for lat={lat}, lon={lon} ({len(interpolated_entries)} records)")
+
+    print("🎉 All locations processed successfully.")
+    # Optional: trigger next step
+    from .tasks import spatially_interpolate_wind_data
+    spatially_interpolate_wind_data.delay()
+
+
+
+@shared_task
+def spatially_interpolate_wind_data():
+    print("🚀 Starting spatial interpolation...")
+
+    # Get all unique timestamps from interpolated data
+    timestamps = WindDataInterpolated.objects.values_list('valid_time', flat=True).distinct()
+
+    total_inserted = 0
+
+    for ts in timestamps:
+        # Query all data at this timestamp
+        qs = WindDataInterpolated.objects.filter(valid_time=ts).only('latitude', 'longitude', 'wind_speed')
+
+        if qs.count() < 3:
+            continue  # griddata needs at least 3 points
+
+        # Convert to DataFrame
+        df = pd.DataFrame.from_records(qs.values('latitude', 'longitude', 'wind_speed'))
+
+        points = df[['latitude', 'longitude']].values
+        values = df['wind_speed'].values
+
+        # Define spatial grid — adjust resolution as needed
+        lat_range = np.arange(df['latitude'].min(), df['latitude'].max(), 0.01)
+        lon_range = np.arange(df['longitude'].min(), df['longitude'].max(), 0.01)
+        grid_lat, grid_lon = np.meshgrid(lat_range, lon_range)
+
+        grid_points = np.c_[grid_lat.ravel(), grid_lon.ravel()]
+        interpolated_values = griddata(points, values, grid_points, method='linear')
+
+        # Create model objects for valid points
+        interpolated_entries = []
+        for (lat, lon), val in zip(grid_points, interpolated_values):
+            if np.isnan(val):
+                continue
+            interpolated_entries.append(WindDataSpatialInterpolated(
+                valid_time=ts,
+                latitude=lat,
+                longitude=lon,
+                wind_speed=round(float(val), 2)
             ))
 
-        # Bulk insert into DB (you can delete previous interpolated entries if you want to overwrite)
-        WindDataInterpolated.objects.filter(latitude=lat, longitude=lon).delete()
-        WindDataInterpolated.objects.bulk_create(interpolated_entries)
+        # Insert in batches
+        for chunk in chunked(interpolated_entries, 1000):
+            with transaction.atomic():
+                WindDataSpatialInterpolated.objects.bulk_create(chunk, batch_size=1000)
 
-        print(f"Interpolated and saved data for lat: {lat}, lon: {lon} ({len(interpolated_entries)} records)")
+        total_inserted += len(interpolated_entries)
+        print(f"✅ Spatial interpolation done for {ts} — inserted {len(interpolated_entries)} records")
 
-    print("✅ All locations processed.")
+    print(f"🎉 Spatial interpolation complete! Total records inserted: {total_inserted}")

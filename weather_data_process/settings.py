@@ -77,6 +77,7 @@ DATABASES = {
         'NAME': os.environ.get('MYSQL_DATABASE', 'forecast_data'),
         'USER': 'root',
         'HOST': 'host.docker.internal',
+        # 'HOST':'127.0.0.1',
         'PASSWORD': 'qwerty@123',
         'PORT': '3306',
     }

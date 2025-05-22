@@ -13,7 +13,7 @@ app.config_from_object('django.conf:settings', namespace='CELERY')
 app.conf.beat_schedule = {
     'run-shared-task-every-minute': {
         'task': 'forecast_process.tasks.download_all_file_grib_file',
-        'schedule': crontab(hour=1),  # runs every minute
+        'schedule': crontab(minute=0, hour='0,4,8,12,14,16,20'),  # runs at 00, 04, 08, 12, 16, 20
         # 'schedule': timedelta(seconds=1),  # runs every
     },
 }

@@ -19,3 +19,13 @@ class WindDataInterpolated(models.Model):
 
     class Meta:
         unique_together = ('valid_time', 'latitude', 'longitude')
+
+# Example model (make sure you have this or similar model defined)
+class WindDataSpatialInterpolated(models.Model):
+    valid_time = models.DateTimeField()
+    latitude = models.FloatField()
+    longitude = models.FloatField()
+    wind_speed = models.FloatField()
+
+    class Meta:
+        unique_together = ('valid_time', 'latitude', 'longitude')
