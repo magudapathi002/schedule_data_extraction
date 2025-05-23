@@ -198,7 +198,8 @@ def interpolate_and_store_wind_data_15min():
 
     for lat, lon in locations:
         # Efficient queryset and streaming
-        qs = WindData10m.objects.filter(latitude=lat, longitude=lon).only("valid_time", "wind_speed").order_by("valid_time").iterator()
+        qs = WindData10m.objects.filter(latitude=lat, longitude=lon).only("valid_time", "wind_speed").order_by(
+            "valid_time").iterator()
 
         data = [(obj.valid_time, obj.wind_speed) for obj in qs]
         if len(data) < 4:
@@ -245,7 +246,6 @@ def interpolate_and_store_wind_data_15min():
     spatially_interpolate_wind_data.delay()
 
 
-
 @shared_task
 def spatially_interpolate_wind_data():
     print("🚀 Starting spatial interpolation...")
@@ -260,7 +260,8 @@ def spatially_interpolate_wind_data():
         qs = WindDataInterpolated.objects.filter(valid_time=ts).only('latitude', 'longitude', 'wind_speed')
 
         if qs.count() < 3:
-            continue  # griddata needs at least 3 points
+            print(f"⚠️ Skipping timestamp {ts} due to insufficient points (<3)")
+            continue  # griddata needs at least 3 points for linear interpolation
 
         # Convert to DataFrame
         df = pd.DataFrame.from_records(qs.values('latitude', 'longitude', 'wind_speed'))
@@ -269,14 +270,24 @@ def spatially_interpolate_wind_data():
         values = df['wind_speed'].values
 
         # Define spatial grid — adjust resolution as needed
-        lat_range = np.arange(df['latitude'].min(), df['latitude'].max(), 0.01)
-        lon_range = np.arange(df['longitude'].min(), df['longitude'].max(), 0.01)
+        lat_min, lat_max = df['latitude'].min(), df['latitude'].max()
+        lon_min, lon_max = df['longitude'].min(), df['longitude'].max()
+        lat_range = np.arange(lat_min, lat_max, 0.01)
+        lon_range = np.arange(lon_min, lon_max, 0.01)
         grid_lat, grid_lon = np.meshgrid(lat_range, lon_range)
 
         grid_points = np.c_[grid_lat.ravel(), grid_lon.ravel()]
+
+        # Try linear interpolation first
         interpolated_values = griddata(points, values, grid_points, method='linear')
 
-        # Create model objects for valid points
+        # Fallback to nearest if linear returns too many NaNs
+        nan_ratio = np.isnan(interpolated_values).mean()
+        if nan_ratio > 0.3:  # Threshold: if more than 30% NaNs, fallback
+            print(f"⚠️ High NaN ratio ({nan_ratio:.2f}) at {ts}, falling back to nearest interpolation.")
+            interpolated_values = griddata(points, values, grid_points, method='nearest')
+
+        # Create model objects for valid points only
         interpolated_entries = []
         for (lat, lon), val in zip(grid_points, interpolated_values):
             if np.isnan(val):
