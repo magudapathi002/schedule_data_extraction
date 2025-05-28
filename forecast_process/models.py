@@ -5,6 +5,8 @@ class WindData10m(models.Model):
     valid_time = models.DateTimeField()
     latitude = models.FloatField()
     longitude = models.FloatField()
+    u_value = models.FloatField(default=None, null=True)
+    v_value = models.FloatField(default=None, null=True)
     wind_speed = models.FloatField()
 
     def __str__(self):

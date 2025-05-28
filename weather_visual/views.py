@@ -33,4 +33,4 @@ def wind_trend_view(request):
         "data_by_day": json.dumps(daily_data),
         "location": f"{lat}, {lon}",
     }
-    return render(request, "wind_trend.html", context)
+    return render(request, "wind_trend/wind_trend.html", context)

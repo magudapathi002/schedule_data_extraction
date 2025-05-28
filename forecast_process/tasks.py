@@ -1,4 +1,5 @@
 import os
+from datetime import datetime
 
 import pandas as pd
 import requests
@@ -14,35 +15,40 @@ from urllib3.util.retry import Retry
 
 
 @shared_task
-def download_all_file_grib_file():
+def download_cycle_grib_files(run_date=None, cycle="00", retry_count=0):
     base_url = "https://nomads.ncep.noaa.gov/cgi-bin/filter_gfs_0p25.pl"
-    run_date = "20250521"
-    cycle = "00"
-    save_dir = "grib_data"
+    run_date = run_date or datetime.utcnow().strftime('%Y%m%d')
+    save_dir = f"grib_data/{run_date}_{cycle}"
     os.makedirs(save_dir, exist_ok=True)
 
-    # Setup retry session
+    forecast_hours = list(range(0, 121)) + list(range(123, 385, 3))
+    total_files = len(forecast_hours)
+
     session = requests.Session()
     retries = Retry(
         total=5,
-        backoff_factor=2,
+        backoff_factor=1,
         status_forcelist=[429, 500, 502, 503, 504],
         allowed_methods=["GET"]
     )
     session.mount("https://", HTTPAdapter(max_retries=retries))
 
-    # Forecast hours: 0-120 hourly + 123 to 384 every 3 hours
-    forecast_hours = list(range(0, 121)) + list(range(123, 385, 3))
+    missing_files = []
 
     for fhr in forecast_hours:
         fhr_str = f"f{fhr:03d}"
         filename = f"gfs.t{cycle}z.pgrb2.0p25.{fhr_str}"
+        out_path = os.path.join(save_dir, filename)
+
+        if os.path.exists(out_path):
+            print(f"✅ Already exists: {filename}")
+            continue
+
         params = {
             "file": filename,
             "lev_10_m_above_ground": "on",
             "var_UGRD": "on",
             "var_VGRD": "on",
-            "subregion": "",
             "toplat": 11.52,
             "leftlon": 76.39,
             "rightlon": 77.29,
@@ -50,26 +56,41 @@ def download_all_file_grib_file():
             "dir": f"/gfs.{run_date}/{cycle}/atmos"
         }
 
-        print(f"Downloading {filename}...")
+        print(f"⬇️ Downloading {filename}...")
         try:
             response = session.get(base_url, params=params, stream=True, timeout=60)
             if response.status_code == 200:
-                out_path = os.path.join(save_dir, filename)
                 with open(out_path, "wb") as f:
                     for chunk in response.iter_content(chunk_size=8192):
                         f.write(chunk)
-                print(f"Saved {filename}")
+                print(f"✅ Saved: {filename}")
+            elif response.status_code == 404:
+                print(f"❌ 404 Not Found: {filename}")
+                if os.path.exists(out_path):
+                    os.remove(out_path)
+                missing_files.append(fhr)
             else:
-                print(f"Failed to download {filename}: HTTP {response.status_code}")
+                print(f"❌ HTTP {response.status_code} for {filename}")
+                missing_files.append(fhr)
+
         except Exception as e:
             print(f"⚠️ Error downloading {filename}: {e}")
+            missing_files.append(fhr)
 
-    print('all files is downloaded')
+    if missing_files:
+        if retry_count < 5:
+            print(f"🔁 Missing {len(missing_files)} files. Retrying in 30 minutes...")
+            # Requeue the task manually using `.apply_async()`
+            download_cycle_grib_files.apply_async(
+                kwargs={"run_date": run_date, "cycle": cycle, "retry_count": retry_count + 1},
+                countdown=30 * 60
+            )
+        else:
+            print("❌ Max retries reached. Skipping this cycle.")
+        return
 
-    # ⏩ Now trigger the extraction task
-    extract_and_store_wind_data.delay()
-
-    return "Download + extraction triggered"
+    print(f"✅ All {total_files} files downloaded for cycle {cycle}")
+    extract_and_store_wind_data.delay(run_date=run_date, cycle=cycle)
 
 
 @shared_task
@@ -242,69 +263,71 @@ def interpolate_and_store_wind_data_15min():
 
     print("🎉 All locations processed successfully.")
     # Optional: trigger next step
-    from .tasks import spatially_interpolate_wind_data
-    spatially_interpolate_wind_data.delay()
-
-
-@shared_task
-def spatially_interpolate_wind_data():
-    print("🚀 Starting spatial interpolation...")
-
-    # Get all unique timestamps from interpolated data
-    timestamps = WindDataInterpolated.objects.values_list('valid_time', flat=True).distinct()
-
-    total_inserted = 0
-
-    for ts in timestamps:
-        # Query all data at this timestamp
-        qs = WindDataInterpolated.objects.filter(valid_time=ts).only('latitude', 'longitude', 'wind_speed')
-
-        if qs.count() < 3:
-            print(f"⚠️ Skipping timestamp {ts} due to insufficient points (<3)")
-            continue  # griddata needs at least 3 points for linear interpolation
-
-        # Convert to DataFrame
-        df = pd.DataFrame.from_records(qs.values('latitude', 'longitude', 'wind_speed'))
-
-        points = df[['latitude', 'longitude']].values
-        values = df['wind_speed'].values
-
-        # Define spatial grid — adjust resolution as needed
-        lat_min, lat_max = df['latitude'].min(), df['latitude'].max()
-        lon_min, lon_max = df['longitude'].min(), df['longitude'].max()
-        lat_range = np.arange(lat_min, lat_max, 0.01)
-        lon_range = np.arange(lon_min, lon_max, 0.01)
-        grid_lat, grid_lon = np.meshgrid(lat_range, lon_range)
-
-        grid_points = np.c_[grid_lat.ravel(), grid_lon.ravel()]
-
-        # Try linear interpolation first
-        interpolated_values = griddata(points, values, grid_points, method='linear')
-
-        # Fallback to nearest if linear returns too many NaNs
-        nan_ratio = np.isnan(interpolated_values).mean()
-        if nan_ratio > 0.3:  # Threshold: if more than 30% NaNs, fallback
-            print(f"⚠️ High NaN ratio ({nan_ratio:.2f}) at {ts}, falling back to nearest interpolation.")
-            interpolated_values = griddata(points, values, grid_points, method='nearest')
-
-        # Create model objects for valid points only
-        interpolated_entries = []
-        for (lat, lon), val in zip(grid_points, interpolated_values):
-            if np.isnan(val):
-                continue
-            interpolated_entries.append(WindDataSpatialInterpolated(
-                valid_time=ts,
-                latitude=lat,
-                longitude=lon,
-                wind_speed=round(float(val), 2)
-            ))
-
-        # Insert in batches
-        for chunk in chunked(interpolated_entries, 1000):
-            with transaction.atomic():
-                WindDataSpatialInterpolated.objects.bulk_create(chunk, batch_size=1000)
-
-        total_inserted += len(interpolated_entries)
-        print(f"✅ Spatial interpolation done for {ts} — inserted {len(interpolated_entries)} records")
-
-    print(f"🎉 Spatial interpolation complete! Total records inserted: {total_inserted}")
+#     from .tasks import spatially_interpolate_wind_data
+#     spatially_interpolate_wind_data.delay()
+#
+#
+# @shared_task
+# def spatially_interpolate_wind_data():
+#     print("🚀 Starting spatial interpolation...")
+#
+#     # Get all unique timestamps from interpolated data
+#     timestamps = WindDataInterpolated.objects.values_list('valid_time', flat=True).distinct()
+#
+#     total_inserted = 0
+#
+#     for ts in timestamps:
+#         # Query all data at this timestamp
+#         qs = WindDataInterpolated.objects.filter(valid_time=ts).only('latitude', 'longitude', 'wind_speed')
+#
+#         if qs.count() < 3:
+#             print(f"⚠️ Skipping timestamp {ts} due to insufficient points (<3)")
+#             continue  # griddata needs at least 3 points for linear interpolation
+#
+#         # Convert to DataFrame
+#         df = pd.DataFrame.from_records(qs.values('latitude', 'longitude', 'wind_speed'))
+#
+#         points = df[['latitude', 'longitude']].values
+#         values = df['wind_speed'].values
+#
+#         # Define spatial grid — adjust resolution as needed
+#         lat_min, lat_max = df['latitude'].min(), df['latitude'].max()
+#         lon_min, lon_max = df['longitude'].min(), df['longitude'].max()
+#         lat_range = np.arange(lat_min, lat_max, 0.01)
+#         lon_range = np.arange(lon_min, lon_max, 0.01)
+#         grid_lat, grid_lon = np.meshgrid(lat_range, lon_range)
+#
+#         grid_points = np.c_[grid_lat.ravel(), grid_lon.ravel()]
+#
+#         try:
+#             interpolated_values = griddata(points, values, grid_points, method='cubic')
+#         except:
+#             interpolated_values = griddata(points, values, grid_points, method='linear')  # fallback
+#
+#         # Fallback to nearest if linear returns too many NaNs
+#         nan_ratio = np.isnan(interpolated_values).mean()
+#         if nan_ratio > 0.3:  # Threshold: if more than 30% NaNs, fallback
+#             print(f"⚠️ High NaN ratio ({nan_ratio:.2f}) at {ts}, falling back to nearest interpolation.")
+#             interpolated_values = griddata(points, values, grid_points, method='nearest')
+#
+#         # Create model objects for valid points only
+#         interpolated_entries = []
+#         for (lat, lon), val in zip(grid_points, interpolated_values):
+#             if np.isnan(val):
+#                 continue
+#             interpolated_entries.append(WindDataSpatialInterpolated(
+#                 valid_time=ts,
+#                 latitude=lat,
+#                 longitude=lon,
+#                 wind_speed=round(float(val), 2)
+#             ))
+#
+#         # Insert in batches
+#         for chunk in chunked(interpolated_entries, 1000):
+#             with transaction.atomic():
+#                 WindDataSpatialInterpolated.objects.bulk_create(chunk, batch_size=1000)
+#
+#         total_inserted += len(interpolated_entries)
+#         print(f"✅ Spatial interpolation done for {ts} — inserted {len(interpolated_entries)} records")
+#
+#     print(f"🎉 Spatial interpolation complete! Total records inserted: {total_inserted}")
