@@ -7,17 +7,108 @@ import numpy as np
 import xarray as xr
 from celery import shared_task
 from django.db import transaction
-from scipy.interpolate import griddata, PchipInterpolator
+from scipy.interpolate import PchipInterpolator
+from .utils import get_or_create_today_status
+from .models import GRIBCycleStatus
 
 from .models import WindData10m, WindDataInterpolated, WindDataSpatialInterpolated
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 
+# @shared_task
+# def download_cycle_grib_files(run_date=None, cycle="00", retry_count=0):
+#     base_url = "https://nomads.ncep.noaa.gov/cgi-bin/filter_gfs_0p25.pl"
+#     run_date = run_date or datetime.utcnow().strftime('%Y%m%d')
+#     save_dir = f"grib_data/{run_date}_{cycle}"
+#     os.makedirs(save_dir, exist_ok=True)
+#
+#     forecast_hours = list(range(0, 121)) + list(range(123, 385, 3))
+#     total_files = len(forecast_hours)
+#
+#     session = requests.Session()
+#     retries = Retry(
+#         total=5,
+#         backoff_factor=1,
+#         status_forcelist=[429, 500, 502, 503, 504],
+#         allowed_methods=["GET"]
+#     )
+#     session.mount("https://", HTTPAdapter(max_retries=retries))
+#
+#     missing_files = []
+#
+#     for fhr in forecast_hours:
+#         fhr_str = f"f{fhr:03d}"
+#         filename = f"gfs.t{cycle}z.pgrb2.0p25.{fhr_str}"
+#         out_path = os.path.join(save_dir, filename)
+#
+#         if os.path.exists(out_path):
+#             print(f"✅ Already exists: {filename}")
+#             continue
+#
+#         params = {
+#             "file": filename,
+#             "lev_10_m_above_ground": "on",
+#             "var_UGRD": "on",
+#             "var_VGRD": "on",
+#             "subregion":'',
+#             "toplat": 11.52,
+#             "leftlon": 76.39,
+#             "rightlon": 77.29,
+#             "bottomlat": 10.37,
+#             "dir": f"/gfs.{run_date}/{cycle}/atmos"
+#         }
+#
+#         print(f"⬇️ Downloading {filename}...")
+#         try:
+#             response = session.get(base_url, params=params, stream=True, timeout=60)
+#             if response.status_code == 200:
+#                 with open(out_path, "wb") as f:
+#                     for chunk in response.iter_content(chunk_size=8192):
+#                         f.write(chunk)
+#                 print(f"✅ Saved: {filename}")
+#             elif response.status_code == 404:
+#                 print(f"❌ 404 Not Found: {filename}")
+#                 if os.path.exists(out_path):
+#                     os.remove(out_path)
+#                 missing_files.append(fhr)
+#             else:
+#                 print(f"❌ HTTP {response.status_code} for {filename}")
+#                 missing_files.append(fhr)
+#
+#         except Exception as e:
+#             print(f"⚠️ Error downloading {filename}: {e}")
+#             missing_files.append(fhr)
+#
+#     if missing_files:
+#         if retry_count < 10:
+#             print(f"🔁 Missing {len(missing_files)} files. Retrying in 30 minutes...")
+#             # Requeue the task manually using `.apply_async()`
+#             download_cycle_grib_files.apply_async(
+#                 kwargs={"run_date": run_date, "cycle": cycle, "retry_count": retry_count + 1},
+#                 countdown=30 * 60
+#             )
+#         else:
+#             print("❌ Max retries reached. Skipping this cycle.")
+#         return
+#
+#     print(f"✅ All {total_files} files downloaded for cycle {cycle}")
+#     extract_and_store_wind_data.delay(run_date=run_date, cycle=cycle)
+
 @shared_task
-def download_cycle_grib_files(run_date=None, cycle="00", retry_count=0):
+def download_cycle_grib_files(run_date=None, cycle=None, retry_count=0):
+
     base_url = "https://nomads.ncep.noaa.gov/cgi-bin/filter_gfs_0p25.pl"
     run_date = run_date or datetime.utcnow().strftime('%Y%m%d')
+    today_status = get_or_create_today_status()
+
+    # Automatically decide which cycle to run if not provided
+    if not cycle:
+        cycle = today_status.get_next_pending_cycle()
+        if not cycle:
+            print(f"🎉 All cycles completed for {run_date}")
+            return
+
     save_dir = f"grib_data/{run_date}_{cycle}"
     os.makedirs(save_dir, exist_ok=True)
 
@@ -49,6 +140,7 @@ def download_cycle_grib_files(run_date=None, cycle="00", retry_count=0):
             "lev_10_m_above_ground": "on",
             "var_UGRD": "on",
             "var_VGRD": "on",
+            "subregion": '',
             "toplat": 11.52,
             "leftlon": 76.39,
             "rightlon": 77.29,
@@ -72,30 +164,35 @@ def download_cycle_grib_files(run_date=None, cycle="00", retry_count=0):
             else:
                 print(f"❌ HTTP {response.status_code} for {filename}")
                 missing_files.append(fhr)
-
         except Exception as e:
             print(f"⚠️ Error downloading {filename}: {e}")
             missing_files.append(fhr)
 
     if missing_files:
-        if retry_count < 5:
+        if retry_count < 10:
             print(f"🔁 Missing {len(missing_files)} files. Retrying in 30 minutes...")
-            # Requeue the task manually using `.apply_async()`
             download_cycle_grib_files.apply_async(
                 kwargs={"run_date": run_date, "cycle": cycle, "retry_count": retry_count + 1},
                 countdown=30 * 60
             )
         else:
-            print("❌ Max retries reached. Skipping this cycle.")
+            print("❌ Max retries reached. Marking this cycle as failed.")
+            setattr(today_status, f'cycle_{cycle}', 'failed')
+            today_status.save()
         return
 
     print(f"✅ All {total_files} files downloaded for cycle {cycle}")
     extract_and_store_wind_data.delay(run_date=run_date, cycle=cycle)
 
+    # Mark cycle as completed in the DB
+    setattr(today_status, f'cycle_{cycle}', 'completed')
+    today_status.save()
+    print(f"📌 Updated DB status: {run_date} cycle {cycle} → completed")
+
 
 @shared_task
-def extract_and_store_wind_data():
-    data_dir = "grib_data"
+def extract_and_store_wind_data(run_date, cycle):
+    data_dir = f"grib_data/{run_date}_{cycle}"
     files = sorted(f for f in os.listdir(data_dir) if f.endswith(".grib2") or f.endswith(".grb2") or "pgrb2" in f)
 
     for file in files:
@@ -108,7 +205,7 @@ def extract_and_store_wind_data():
                 backend_kwargs={"decode_timedelta": True}
             )
 
-            # Retrieve wind components (try u10/v10 first, then fallback to u/v)
+            # Retrieve wind components
             if 'u10' in ds and 'v10' in ds:
                 ugrd = ds['u10']
                 vgrd = ds['v10']
@@ -131,32 +228,34 @@ def extract_and_store_wind_data():
             if isinstance(step_val, np.ndarray):
                 step_val = step_val[0]
 
-            # Convert to Python datetime to avoid fromisoformat errors
+            # Combine to get final valid time
             valid_time = pd.to_datetime(time_val + step_val).to_pydatetime()
 
-            wind_data_entries = []
             shape = wind_speed.shape
 
-            for lat_idx, lat in enumerate(latitudes):
-                for lon_idx, lon in enumerate(longitudes):
-                    # Handle both 2D and 3D arrays
-                    if len(shape) == 3:
-                        ws_value = round(float(wind_speed[0, lat_idx, lon_idx]), 2)
-                    elif len(shape) == 2:
-                        ws_value = round(float(wind_speed[lat_idx, lon_idx]), 2)
-                    else:
-                        raise ValueError(f"Unexpected wind_speed shape: {shape}")
+            with transaction.atomic():
+                for lat_idx, lat in enumerate(latitudes):
+                    for lon_idx, lon in enumerate(longitudes):
+                        if len(shape) == 3:
+                            ws_value = round(float(wind_speed[0, lat_idx, lon_idx]), 2)
+                        elif len(shape) == 2:
+                            ws_value = round(float(wind_speed[lat_idx, lon_idx]), 2)
+                        else:
+                            raise ValueError(f"Unexpected wind_speed shape: {shape}")
 
-                    wind_data_entries.append(WindData10m(
-                        valid_time=valid_time,
-                        latitude=float(lat),
-                        longitude=float(lon),
-                        wind_speed=ws_value
-                    ))
-            WindData10m.objects.bulk_create(wind_data_entries)
-            print(f"✅ Parsed and saved from: {file} ({len(wind_data_entries)} records)")
+                        WindData10m.objects.update_or_create(
+                                valid_time=valid_time,
+                                latitude=float(lat),
+                                longitude=float(lon),
+                            defaults={"wind_speed": ws_value}
+                        )
+
+            print(f"✅ Parsed and upserted: {file}")
+
         except Exception as e:
             print(f"⚠️ Error processing {file}: {e}")
+
+    # Continue to the next task
     interpolate_and_store_wind_data_15min.delay()
 
 
@@ -211,62 +310,107 @@ def chunked(iterable, size):
     for i in range(0, len(iterable), size):
         yield iterable[i:i + size]
 
-
 @shared_task
 def interpolate_and_store_wind_data_15min():
     # Get all unique lat/lon pairs
     locations = WindData10m.objects.values_list('latitude', 'longitude').distinct()
 
     for lat, lon in locations:
-        # Efficient queryset and streaming
-        qs = WindData10m.objects.filter(latitude=lat, longitude=lon).only("valid_time", "wind_speed").order_by(
-            "valid_time").iterator()
+        # Stream data efficiently
+        qs = WindData10m.objects.filter(latitude=lat, longitude=lon).only("valid_time", "wind_speed").order_by("valid_time").iterator()
 
         data = [(obj.valid_time, obj.wind_speed) for obj in qs]
         if len(data) < 4:
             continue  # PCHIP needs at least 4 points
 
-        # Convert to DataFrame
+        # Prepare DataFrame
         df = pd.DataFrame(data, columns=['valid_time', 'wind_speed'])
         df['valid_time'] = pd.to_datetime(df['valid_time'])
         df.set_index('valid_time', inplace=True)
 
-        # Optional: apply smoothing
+        # Smoothing (optional)
         df['wind_speed'] = df['wind_speed'].rolling(window=3, min_periods=1, center=True).mean()
 
-        # Create new 15-min index
-        new_time_index = pd.date_range(start=df.index.min(), end=df.index.max(), freq='15T')
+        # Create 15-minute time index
+        new_time_index = pd.date_range(start=df.index.min(), end=df.index.max(), freq='15min')
 
-        # Use PCHIP interpolation directly
-        interp = PchipInterpolator(df.index.astype(int) / 1e9, df['wind_speed'])  # seconds since epoch
+        # Interpolate using PCHIP
+        interp = PchipInterpolator(df.index.astype(int) / 1e9, df['wind_speed'])
         interpolated_values = interp(new_time_index.astype(int) / 1e9)
 
-        # Prepare bulk data
-        interpolated_entries = [
-            WindDataInterpolated(
-                valid_time=ts.to_pydatetime(),
-                latitude=lat,
-                longitude=lon,
-                wind_speed=round(float(ws), 2)
-            )
-            for ts, ws in zip(new_time_index, interpolated_values)
-            if not pd.isnull(ws)
-        ]
+        # Insert or update records
+        updated_count = 0
+        with transaction.atomic():
+            for ts, ws in zip(new_time_index, interpolated_values):
+                if pd.isnull(ws):
+                    continue
+                WindDataInterpolated.objects.update_or_create(
+                    valid_time=ts.to_pydatetime(),
+                    latitude=lat,
+                    longitude=lon,
+                    defaults={"wind_speed": round(float(ws), 2)}
+                )
+                updated_count += 1
 
-        # Remove old entries and insert new ones in chunks
-        WindDataInterpolated.objects.filter(latitude=lat, longitude=lon).delete()
-        for chunk in chunked(interpolated_entries, 1000):
-            with transaction.atomic():
-                WindDataInterpolated.objects.bulk_create(chunk, batch_size=1000)
-
-        print(f"✅ Interpolated and stored data for lat={lat}, lon={lon} ({len(interpolated_entries)} records)")
+        print(f"✅ Interpolated & upserted lat={lat}, lon={lon} ({updated_count} records)")
 
     print("🎉 All locations processed successfully.")
-    # Optional: trigger next step
-#     from .tasks import spatially_interpolate_wind_data
-#     spatially_interpolate_wind_data.delay()
+
+# @shared_task
+# def interpolate_and_store_wind_data_15min():
+#     # Get all unique lat/lon pairs
+#     locations = WindData10m.objects.values_list('latitude', 'longitude').distinct()
 #
+#     for lat, lon in locations:
+#         # Efficient queryset and streaming
+#         qs = WindData10m.objects.filter(latitude=lat, longitude=lon).only("valid_time", "wind_speed").order_by(
+#             "valid_time").iterator()
 #
+#         data = [(obj.valid_time, obj.wind_speed) for obj in qs]
+#         if len(data) < 4:
+#             continue  # PCHIP needs at least 4 points
+#
+#         # Convert to DataFrame
+#         df = pd.DataFrame(data, columns=['valid_time', 'wind_speed'])
+#         df['valid_time'] = pd.to_datetime(df['valid_time'])
+#         df.set_index('valid_time', inplace=True)
+#
+#         # Optional: apply smoothing
+#         df['wind_speed'] = df['wind_speed'].rolling(window=3, min_periods=1, center=True).mean()
+#
+#         # Create new 15-min index
+#         new_time_index = pd.date_range(start=df.index.min(), end=df.index.max(), freq='15T')
+#
+#         # Use PCHIP interpolation directly
+#         interp = PchipInterpolator(df.index.astype(int) / 1e9, df['wind_speed'])  # seconds since epoch
+#         interpolated_values = interp(new_time_index.astype(int) / 1e9)
+#
+#         # Prepare bulk data
+#         interpolated_entries = [
+#             WindDataInterpolated(
+#                 valid_time=ts.to_pydatetime(),
+#                 latitude=lat,
+#                 longitude=lon,
+#                 wind_speed=round(float(ws), 2)
+#             )
+#             for ts, ws in zip(new_time_index, interpolated_values)
+#             if not pd.isnull(ws)
+#         ]
+#
+#         # Remove old entries and insert new ones in chunks
+#         WindDataInterpolated.objects.filter(latitude=lat, longitude=lon).delete()
+#         for chunk in chunked(interpolated_entries, 1000):
+#             with transaction.atomic():
+#                 WindDataInterpolated.objects.bulk_create(chunk, batch_size=1000)
+#
+#         print(f"✅ Interpolated and stored data for lat={lat}, lon={lon} ({len(interpolated_entries)} records)")
+#
+#     print("🎉 All locations processed successfully.")
+
+
+
+
+
 # @shared_task
 # def spatially_interpolate_wind_data():
 #     print("🚀 Starting spatial interpolation...")

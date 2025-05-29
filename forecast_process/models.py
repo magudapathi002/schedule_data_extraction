@@ -9,6 +9,8 @@ class WindData10m(models.Model):
     v_value = models.FloatField(default=None, null=True)
     wind_speed = models.FloatField()
 
+    class Meta:
+        unique_together = ('valid_time', 'latitude', 'longitude')
     def __str__(self):
         return f"{self.valid_time} @ ({self.latitude}, {self.longitude}) - {self.wind_speed:.2f} m/s"
 
@@ -31,3 +33,20 @@ class WindDataSpatialInterpolated(models.Model):
 
     class Meta:
         unique_together = ('valid_time', 'latitude', 'longitude')
+
+class GRIBCycleStatus(models.Model):
+    date = models.DateField()
+    cycle_00 = models.CharField(max_length=20, default='pending')  # pending, completed, failed
+    cycle_06 = models.CharField(max_length=20, default='pending')
+    cycle_12 = models.CharField(max_length=20, default='pending')
+    cycle_18 = models.CharField(max_length=20, default='pending')
+
+    class Meta:
+        unique_together = ('date',)
+        ordering = ['-date']
+
+    def get_next_pending_cycle(self):
+        for cycle in ['00', '06', '12', '18']:
+            if getattr(self, f'cycle_{cycle}') != 'completed':
+                return cycle
+        return None

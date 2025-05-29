@@ -12,7 +12,7 @@ app.config_from_object('django.conf:settings', namespace='CELERY')
 
 app.conf.beat_schedule = {
     'download-grib-every-4-hours': {
-        'task': 'forecast_process.tasks.download_all_file_grib_file',
+        'task': 'forecast_process.tasks.download_cycle_grib_files',
         'schedule': crontab(minute=0, hour='0,4,8,12,16,20'),  # Runs every 4 hours
     },
 }
