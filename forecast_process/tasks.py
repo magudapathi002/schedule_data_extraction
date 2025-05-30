@@ -169,7 +169,7 @@ def download_cycle_grib_files(run_date=None, cycle=None, retry_count=0):
             missing_files.append(fhr)
 
     if missing_files:
-        if retry_count < 10:
+        if retry_count < 5:
             print(f"🔁 Missing {len(missing_files)} files. Retrying in 30 minutes...")
             download_cycle_grib_files.apply_async(
                 kwargs={"run_date": run_date, "cycle": cycle, "retry_count": retry_count + 1},

@@ -11,16 +11,26 @@ app = Celery('weather_data_process')
 app.config_from_object('django.conf:settings', namespace='CELERY')
 
 app.conf.beat_schedule = {
-    'download-grib-every-4-hours': {
+    'download-grib-cycle-00': {
         'task': 'forecast_process.tasks.download_cycle_grib_files',
-        'schedule': crontab(minute=0, hour='0,4,8,12,16,20'),  # Runs every 4 hours
+        'schedule': crontab(minute=40, hour=5),  # 05:40 UTC
+        'kwargs': {"run_date": None, "cycle": "00"}
+    },
+    'download-grib-cycle-06': {
+        'task': 'forecast_process.tasks.download_cycle_grib_files',
+        'schedule': crontab(minute=40, hour=11),  # 11:40 UTC
+        'kwargs': {"run_date": None, "cycle": "06"}
+    },
+    'download-grib-cycle-12': {
+        'task': 'forecast_process.tasks.download_cycle_grib_files',
+        'schedule': crontab(minute=40, hour=17),  # 17:40 UTC
+        'kwargs': {"run_date": None, "cycle": "12"}
+    },
+    'download-grib-cycle-18': {
+        'task': 'forecast_process.tasks.download_cycle_grib_files',
+        'schedule': crontab(minute=40, hour=23),  # 23:40 UTC
+        'kwargs': {"run_date": None, "cycle": "18"}
     },
 }
-
-
-@app.task()
-def add_numbers():
-    return
-
 
 app.autodiscover_tasks()
