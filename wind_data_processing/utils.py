@@ -1,6 +1,6 @@
 from datetime import date
 
-from forecast_process.models import GRIBCycleStatus
+from wind_data_processing.models import GRIBCycleStatus
 
 
 def url_generator(url):

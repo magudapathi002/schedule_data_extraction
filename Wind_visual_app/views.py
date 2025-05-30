@@ -3,7 +3,7 @@ from collections import defaultdict
 from django.shortcuts import render
 import json
 
-from forecast_process.models import WindData10m, WindDataInterpolated
+from wind_data_processing.models import WindData10m, WindDataInterpolated
 
 
 def wind_trend_view(request):

@@ -1,5 +1,5 @@
 """
-WSGI config for weather_data_process project.
+WSGI config for wind_forecast_project project.
 
 It exposes the WSGI callable as a module-level variable named ``application``.
 
@@ -11,6 +11,6 @@ import os
 
 from django.core.wsgi import get_wsgi_application
 
-os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'weather_data_process.settings')
+os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'wind_forecast_project.settings')
 
 application = get_wsgi_application()

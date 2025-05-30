@@ -1,6 +1,6 @@
 from django.apps import AppConfig
 
 
-class WeatherVishualConfig(AppConfig):
+class NewappConfig(AppConfig):
     default_auto_field = 'django.db.models.BigAutoField'
-    name = 'weather_visual'
+    name = 'wind_data_processing'

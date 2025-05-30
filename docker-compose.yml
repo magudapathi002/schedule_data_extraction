@@ -23,7 +23,7 @@ services:
     container_name: celery
     build:
       context: .
-    command: celery --app=weather_data_process worker -l INFO
+    command: celery --app=wind_forecast_project worker -l INFO
     volumes:
       - .:/usr/src/app
     env_file:
@@ -35,7 +35,7 @@ services:
     container_name: beat
     build:
       context: .
-    command: celery -A weather_data_process beat -l info --scheduler django_celery_beat.schedulers:DatabaseScheduler
+    command: celery -A wind_forecast_project beat -l info --scheduler django_celery_beat.schedulers:DatabaseScheduler
     volumes:
       - .:/usr/src/app
     env_file:

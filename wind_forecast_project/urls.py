@@ -1,5 +1,5 @@
 """
-URL configuration for weather_data_process project.
+URL configuration for wind_forecast_project project.
 
 The `urlpatterns` list routes URLs to views. For more information please see:
     https://docs.djangoproject.com/en/5.2/topics/http/urls/
@@ -19,6 +19,6 @@ from django.urls import path, include
 
 urlpatterns = [
     # path('admin/', admin.site.urls),
-    path('home/', include('forecast_process.urls'), name='forecast_process'),
-    path('finder/',include('weather_visual.urls'),name='weather_visual')
+    path('home/', include('wind_data_processing.urls'), name='wind_data_processing'),
+    path('finder/', include('Wind_visual_app.urls'), name='Wind_visual_app')
 ]

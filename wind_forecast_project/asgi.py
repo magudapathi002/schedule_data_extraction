@@ -1,5 +1,5 @@
 """
-ASGI config for weather_data_process project.
+ASGI config for wind_forecast_project project.
 
 It exposes the ASGI callable as a module-level variable named ``application``.
 
@@ -11,6 +11,6 @@ import os
 
 from django.core.asgi import get_asgi_application
 
-os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'weather_data_process.settings')
+os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'wind_forecast_project.settings')
 
 application = get_asgi_application()
