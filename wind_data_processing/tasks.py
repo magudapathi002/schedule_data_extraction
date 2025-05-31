@@ -311,7 +311,7 @@ def chunked(iterable, size):
         yield iterable[i:i + size]
 
 @shared_task
-def interpolate_and_store_wind_data_15min():
+def interpolate_and_store_wind_data_15min(cycle = None , run_date = None):
     # Get all unique lat/lon pairs
     locations = WindData10m.objects.values_list('latitude', 'longitude').distinct()
 
@@ -353,8 +353,29 @@ def interpolate_and_store_wind_data_15min():
                 updated_count += 1
 
         print(f"✅ Interpolated & upserted lat={lat}, lon={lon} ({updated_count} records)")
-
+    if run_date and cycle:
+        delete_idx_files_for_cycle(run_date, cycle)
     print("🎉 All locations processed successfully.")
+
+def delete_idx_files_for_cycle(run_date, cycle):
+    folder_path = f"grib_data/{run_date}_{cycle}"
+    deleted_count = 0
+
+    if not os.path.exists(folder_path):
+        print(f"❌ Folder not found: {folder_path}")
+        return
+
+    for root, dirs, files in os.walk(folder_path):
+        for file in files:
+            if file.endswith(".idx"):
+                file_path = os.path.join(root, file)
+                try:
+                    os.remove(file_path)
+                    deleted_count += 1
+                except Exception as e:
+                    print(f"⚠️ Failed to delete {file_path}: {e}")
+
+    print(f"🧹 Deleted {deleted_count} .idx files from {folder_path}")
 
 # @shared_task
 # def interpolate_and_store_wind_data_15min():

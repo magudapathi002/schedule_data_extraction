@@ -20,5 +20,6 @@ def url_generator(url):
 
 def get_or_create_today_status():
     today = date.today()
+    # today = '2025-05-30'
     status_obj, _ = GRIBCycleStatus.objects.get_or_create(date=today)
     return status_obj
