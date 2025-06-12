@@ -21,6 +21,8 @@ RUN apt-get update && apt-get install -y \
 # Upgrade pip and install wheel
 RUN pip install --upgrade pip wheel
 
+RUN pip install pygrib
+
 # Copy requirements and install Python packages
 COPY requirements.txt .
 RUN pip install -r requirements.txt

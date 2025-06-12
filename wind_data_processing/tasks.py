@@ -14,6 +14,7 @@ from .models import GRIBCycleStatus
 from .models import WindData10m, WindDataInterpolated, WindDataSpatialInterpolated
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+import pygrib
 
 
 # @shared_task
@@ -192,70 +193,46 @@ def download_cycle_grib_files(run_date=None, cycle=None, retry_count=0):
 
 @shared_task
 def extract_and_store_wind_data(run_date, cycle):
-    data_dir = f"grib_data/{run_date}_{cycle}"
+    data_dir = f"grib_data/{run_date}_{str(cycle).zfill(2)}"
     files = sorted(f for f in os.listdir(data_dir) if f.endswith(".grib2") or f.endswith(".grb2") or "pgrb2" in f)
 
     for file in files:
-        path = os.path.join(data_dir, file)
+        file_path = os.path.join(data_dir, file)
         try:
-            ds = xr.open_dataset(
-                path,
-                engine="cfgrib",
-                filter_by_keys={"typeOfLevel": "heightAboveGround", "level": 10},
-                backend_kwargs={"decode_timedelta": True}
-            )
+            grbs = pygrib.open(file_path)
 
-            # Retrieve wind components
-            if 'u10' in ds and 'v10' in ds:
-                ugrd = ds['u10']
-                vgrd = ds['v10']
-            elif 'u' in ds and 'v' in ds:
-                ugrd = ds['u']
-                vgrd = ds['v']
-            else:
-                raise KeyError("Missing wind components (u10/v10 or u/v)")
+            u_grbs = grbs.select(name='10 metre U wind component')
+            v_grbs = grbs.select(name='10 metre V wind component')
 
-            wind_speed = np.sqrt(ugrd ** 2 + vgrd ** 2)
-            latitudes = ds.latitude.values
-            longitudes = ds.longitude.values
+            if not u_grbs or not v_grbs:
+                raise ValueError("Wind components not found in GRIB file")
 
-            # Safely extract valid_time
-            time_val = ds.time.values
-            if isinstance(time_val, np.ndarray):
-                time_val = time_val[0]
+            ugrd = u_grbs[0]
+            vgrd = v_grbs[0]
 
-            step_val = ds.step.values
-            if isinstance(step_val, np.ndarray):
-                step_val = step_val[0]
+            u_data, lats, lons = ugrd.data()
+            v_data, _, _ = vgrd.data()
 
-            # Combine to get final valid time
-            valid_time = pd.to_datetime(time_val + step_val).to_pydatetime()
+            wind_speed = np.sqrt(u_data**2 + v_data**2)
 
-            shape = wind_speed.shape
+            # Get valid time from metadata
+            valid_time = ugrd.validDate
 
             with transaction.atomic():
-                for lat_idx, lat in enumerate(latitudes):
-                    for lon_idx, lon in enumerate(longitudes):
-                        if len(shape) == 3:
-                            ws_value = round(float(wind_speed[0, lat_idx, lon_idx]), 2)
-                        elif len(shape) == 2:
-                            ws_value = round(float(wind_speed[lat_idx, lon_idx]), 2)
-                        else:
-                            raise ValueError(f"Unexpected wind_speed shape: {shape}")
-
+                for i in range(lats.shape[0]):
+                    for j in range(lats.shape[1]):
                         WindData10m.objects.update_or_create(
-                                valid_time=valid_time,
-                                latitude=float(lat),
-                                longitude=float(lon),
-                            defaults={"wind_speed": ws_value}
+                            valid_time=valid_time,
+                            latitude=float(lats[i, j]),
+                            longitude=float(lons[i, j]),
+                            defaults={"wind_speed": round(float(wind_speed[i, j]), 2)}
                         )
 
-            print(f"✅ Parsed and upserted: {file}")
+            print(f"✅ Parsed and stored: {file}")
 
         except Exception as e:
             print(f"⚠️ Error processing {file}: {e}")
 
-    # Continue to the next task
     interpolate_and_store_wind_data_15min.delay()
 
 
