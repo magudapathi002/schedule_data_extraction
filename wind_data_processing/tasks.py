@@ -7,11 +7,14 @@ import numpy as np
 import xarray as xr
 from celery import shared_task
 from django.db import transaction
+from django.utils import timezone
 from scipy.interpolate import PchipInterpolator
 from .utils import get_or_create_today_status
-from .models import GRIBCycleStatus
+from .models import GRIBCycleStatus, SunshineDuration, WindGust, Radiation, Precipitation, PrecipitationInterpolated, \
+    RadiationInterpolated, TemperatureInterpolated, Temperature, CloudCoverInterpolated, TotalCloudCover, WindComponent, \
+    InterpolatedVariable, Albedo, CAPE, Humidity
 
-from .models import WindData10m, WindDataInterpolated, WindDataSpatialInterpolated
+from .models import WindData10m, WindDataInterpolated
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 import pygrib
@@ -98,7 +101,6 @@ import pygrib
 
 @shared_task
 def download_cycle_grib_files(run_date=None, cycle=None, retry_count=0):
-
     base_url = "https://nomads.ncep.noaa.gov/cgi-bin/filter_gfs_0p25.pl"
     run_date = run_date or datetime.utcnow().strftime('%Y%m%d')
     today_status = get_or_create_today_status()
@@ -139,6 +141,27 @@ def download_cycle_grib_files(run_date=None, cycle=None, retry_count=0):
         params = {
             "file": filename,
             "lev_10_m_above_ground": "on",
+            "lev_2_m_above_ground": "on",
+            "lev_80_m_above_ground": "on",
+            "lev_100_m_above_ground": "on",
+            "lev_850_mb": "on",
+            "lev_800_mb": "on",
+            "lev_600_mb": "on",
+            "lev_surface": "on",
+            "var_ACPCP": "on",
+            "var_ALBDO": "on",
+            "var_CAPE": "on",
+            "var_CPRAT": "on",
+            "var_DLWRF": "on",
+            "var_DSWRF": "on",
+            "var_GUST": "on",
+            "var_PRATE": "on",
+            "var_RH": "on",
+            "var_SUNSD": "on",
+            "var_TCDC": "on",
+            "var_TMAX": "on",
+            "var_TMIN": "on",
+            "var_TMP": "on",
             "var_UGRD": "on",
             "var_VGRD": "on",
             "subregion": '',
@@ -183,7 +206,7 @@ def download_cycle_grib_files(run_date=None, cycle=None, retry_count=0):
         return
 
     print(f"✅ All {total_files} files downloaded for cycle {cycle}")
-    extract_and_store_wind_data.delay(run_date=run_date, cycle=cycle)
+    extract_and_store_all_variables.delay(run_date=run_date, cycle=cycle)
 
     # Mark cycle as completed in the DB
     setattr(today_status, f'cycle_{cycle}', 'completed')
@@ -192,7 +215,7 @@ def download_cycle_grib_files(run_date=None, cycle=None, retry_count=0):
 
 
 @shared_task
-def extract_and_store_wind_data(run_date, cycle):
+def extract_and_store_all_variables(run_date, cycle):
     data_dir = f"grib_data/{run_date}_{str(cycle).zfill(2)}"
     files = sorted(f for f in os.listdir(data_dir) if f.endswith(".grib2") or f.endswith(".grb2") or "pgrb2" in f)
 
@@ -201,39 +224,247 @@ def extract_and_store_wind_data(run_date, cycle):
         try:
             grbs = pygrib.open(file_path)
 
-            u_grbs = grbs.select(name='10 metre U wind component')
-            v_grbs = grbs.select(name='10 metre V wind component')
+            # --- Wind Components ---
+            wind_levels = [
+                ("10 metre U wind component", "heightAboveGround", 10),
+                ("10 metre V wind component", "heightAboveGround", 10),
+                ("U component of wind", "heightAboveGround", 80),
+                ("V component of wind", "heightAboveGround", 80),
+                ("100 metre U wind component", "heightAboveGround", 100),
+                ("100 metre V wind component", "heightAboveGround", 100),
+                ("U component of wind", "isobaricInhPa", 850),
+                ("V component of wind", "isobaricInhPa", 850),
+                ("U component of wind", "isobaricInhPa", 600),
+                ("V component of wind", "isobaricInhPa", 600),
+            ]
+            for level_name, level_type, level_val in wind_levels:
+                try:
+                    u = grbs.select(name=level_name, typeOfLevel=level_type, level=level_val)[0]
+                    v = grbs.select(name=level_name, typeOfLevel=level_type, level=level_val)[0]
+                    u_data, lats, lons = u.data()
+                    v_data, _, _ = v.data()
+                    valid_time = u.validDate
 
-            if not u_grbs or not v_grbs:
-                raise ValueError("Wind components not found in GRIB file")
+                    with transaction.atomic():
+                        for i in range(lats.shape[0]):
+                            for j in range(lats.shape[1]):
+                                WindComponent.objects.update_or_create(
+                                    valid_time=valid_time,
+                                    latitude=float(lats[i, j]),
+                                    longitude=float(lons[i, j]),
+                                    level=level_val,
+                                    defaults={
+                                        "u_value": float(u_data[i, j]),
+                                        "v_value": float(v_data[i, j]),
+                                    }
+                                )
+                except Exception as e:
+                    print(f"❌ Error storing wind at {level_name}: {e}")
 
-            ugrd = u_grbs[0]
-            vgrd = v_grbs[0]
+            # --- Temperature ---
+            temperature_levels = [
+                ("Temperature", "surface", 0, "t_surface"),
+                ("2 metre temperature", "heightAboveGround", 2, "t2m"),
+                ("Maximum temperature", "heightAboveGround", 2, "tmax"),
+                ("Minimum temperature", "heightAboveGround", 2, "tmin"),
+            ]
+            for level_name, level_type, level_val, shortName in temperature_levels:
+                try:
+                    grb = grbs.select(name=level_name, typeOfLevel=level_type, level=level_val)[0]
+                    data, lats, lons = grb.data()
+                    valid_time = grb.validDate
 
-            u_data, lats, lons = ugrd.data()
-            v_data, _, _ = vgrd.data()
+                    with transaction.atomic():
+                        for i in range(lats.shape[0]):
+                            for j in range(lats.shape[1]):
+                                Temperature.objects.update_or_create(
+                                    valid_time=valid_time,
+                                    latitude=float(lats[i, j]),
+                                    longitude=float(lons[i, j]),
+                                    short_name=shortName,
+                                    level=level_val,
+                                    defaults={"value": float(data[i, j])}
+                                )
+                except Exception as e:
+                    print(f"⚠️ Skipping temperature {level_name}: {e}")
 
-            wind_speed = np.sqrt(u_data**2 + v_data**2)
+            humidity_levels = [
+                ("2 metre relative humidity", "heightAboveGround", 2, "r2"),
+            ]
 
-            # Get valid time from metadata
-            valid_time = ugrd.validDate
+            for level_name, level_type, level_val, ssname in humidity_levels:
+                try:
+                    grb = grbs.select(name=level_name, typeOfLevel=level_type, level=level_val)[0]
+                    data, lats, lons = grb.data()
+                    valid_time = grb.validDate
 
-            with transaction.atomic():
-                for i in range(lats.shape[0]):
-                    for j in range(lats.shape[1]):
-                        WindData10m.objects.update_or_create(
-                            valid_time=valid_time,
-                            latitude=float(lats[i, j]),
-                            longitude=float(lons[i, j]),
-                            defaults={"wind_speed": round(float(wind_speed[i, j]), 2)}
-                        )
+                    with transaction.atomic():
+                        for i in range(lats.shape[0]):
+                            for j in range(lats.shape[1]):
+                                Humidity.objects.update_or_create(
+                                    valid_time=valid_time,
+                                    latitude=float(lats[i, j]),
+                                    longitude=float(lons[i, j]),
+                                    short_name=ssname,
+                                    level=level_val,
+                                    defaults={"value": float(data[i, j])}
+                                )
+                except Exception as e:
+                    print(f"⚠️ Skipping humidity {level_name}: {e}")
+
+            # --- Cloud Cover ---
+            cloud_cover_levels = [
+                ("Total Cloud Cover", "isobaricInhPa", 850, "tcc850"),
+                ("Total Cloud Cover", "isobaricInhPa", 800, "tcc800"),
+            ]
+
+            for level_name, level_type, level_val, sssname in cloud_cover_levels:
+                try:
+                    grb = grbs.select(name=level_name, typeOfLevel=level_type, level=level_val)[0]
+                    data, lats, lons = grb.data()
+                    valid_time = grb.validDate
+
+                    with transaction.atomic():
+                        for i in range(lats.shape[0]):
+                            for j in range(lats.shape[1]):
+                                TotalCloudCover.objects.update_or_create(
+                                    valid_time=valid_time,
+                                    latitude=float(lats[i, j]),
+                                    longitude=float(lons[i, j]),
+                                    short_name=sssname,
+                                    level=level_val,
+                                    defaults={"value": float(data[i, j])}
+                                )
+                except Exception as e:
+                    print(f"⚠️ Skipping cloud cover {level_val}mb: {e}")
+
+            precipitation_types = [
+                ("Convective precipitation (water)", "surface", 0, "acpcp"),
+                ("Convective precipitation rate", "surface", 0, "cprat"),
+                ("Precipitation rate", "surface", 0, "prate"),
+            ]
+            for level_name, level_type, level_val, ssssname in precipitation_types:
+                try:
+                    grb = grbs.select(name=level_name, typeOfLevel=level_type, level=level_val)[0]
+                    data, lats, lons = grb.data()
+                    valid_time = grb.validDate
+
+                    with transaction.atomic():
+                        for i in range(lats.shape[0]):
+                            for j in range(lats.shape[1]):
+                                Precipitation.objects.update_or_create(
+                                    valid_time=valid_time,
+                                    latitude=float(lats[i, j]),
+                                    longitude=float(lons[i, j]),
+                                    short_name=ssssname,
+                                    level=level_val,
+                                    defaults={"value": float(data[i, j])}
+                                )
+                except Exception as e:
+                    print(f"⚠️ Skipping precipitation {level_type} at {level_val}: {e}")
+
+            # --- Radiation ---
+            for level_name, level_type, level_val, sname in [
+                ("Downward long-wave radiation flux", "surface", 0, "dlwrf"),
+                ("Downward short-wave radiation flux", "surface", 0, "dswrf"),
+            ]:
+                try:
+                    grb = grbs.select(name=level_name, typeOfLevel=level_type, level=level_val)[0]
+                    data, lats, lons = grb.data()
+                    valid_time = grb.validDate
+
+                    with transaction.atomic():
+                        for i in range(lats.shape[0]):
+                            for j in range(lats.shape[1]):
+                                Radiation.objects.update_or_create(
+                                    valid_time=valid_time,
+                                    latitude=float(lats[i, j]),
+                                    longitude=float(lons[i, j]),
+                                    short_name=sname,
+                                    level=level_val,
+                                    defaults={"value": float(data[i, j])}
+                                )
+                except Exception as e:
+                    print(f"⚠️ Skipping radiation {level_name}: {e}")
+
+            # --- Wind Gust ---
+            try:
+                gust = grbs.select(name="Wind speed (gust)", typeOfLevel="surface", level=0)[0]
+                gust_data, lats, lons = gust.data()
+                valid_time = gust.validDate
+
+                with transaction.atomic():
+                    for i in range(lats.shape[0]):
+                        for j in range(lats.shape[1]):
+                            WindGust.objects.update_or_create(
+                                valid_time=valid_time,
+                                latitude=float(lats[i, j]),
+                                longitude=float(lons[i, j]),
+                                defaults={"value": float(gust_data[i, j])}
+                            )
+            except Exception as e:
+                print(f"⚠️ Skipping wind gust: {e}")
+
+            # --- Sunshine Duration ---
+            try:
+                sun = grbs.select(name="Sunshine duration", typeOfLevel="surface", level=0)[0]
+                sun_data, lats, lons = sun.data()
+                valid_time = sun.validDate
+
+                with transaction.atomic():
+                    for i in range(lats.shape[0]):
+                        for j in range(lats.shape[1]):
+                            SunshineDuration.objects.update_or_create(
+                                valid_time=valid_time,
+                                latitude=float(lats[i, j]),
+                                longitude=float(lons[i, j]),
+                                defaults={"value": float(sun_data[i, j])}
+                            )
+            except Exception as e:
+                print(f"⚠️ Skipping sunshine duration: {e}")
+
+            # --- CAPE ---
+            try:
+                cape = grbs.select(name="Convective available potential energy", typeOfLevel="surface", level=0)[0]
+                data, lats, lons = cape.data()
+                valid_time = cape.validDate
+
+                with transaction.atomic():
+                    for i in range(lats.shape[0]):
+                        for j in range(lats.shape[1]):
+                            CAPE.objects.update_or_create(
+                                valid_time=valid_time,
+                                latitude=float(lats[i, j]),
+                                longitude=float(lons[i, j]),
+                                defaults={"value": float(data[i, j])}
+                            )
+            except Exception as e:
+                print(f"⚠️ Skipping CAPE: {e}")
+
+            # --- Albedo ---
+            try:
+                alb = grbs.select(name="Forecast albedo", typeOfLevel="surface", level=0)[0]
+                data, lats, lons = alb.data()
+                valid_time = alb.validDate
+
+                with transaction.atomic():
+                    for i in range(lats.shape[0]):
+                        for j in range(lats.shape[1]):
+                            Albedo.objects.update_or_create(
+                                valid_time=valid_time,
+                                latitude=float(lats[i, j]),
+                                longitude=float(lons[i, j]),
+                                defaults={"value": float(data[i, j])}
+                            )
+            except Exception as e:
+                print(f"⚠️ Skipping albedo: {e}")
 
             print(f"✅ Parsed and stored: {file}")
 
         except Exception as e:
-            print(f"⚠️ Error processing {file}: {e}")
+            print(f"❌ Error processing {file}: {e}")
 
-    interpolate_and_store_wind_data_15min.delay()
+    # interpolate_and_store_all_15min.delay()
 
 
 # @shared_task
@@ -283,56 +514,114 @@ def extract_and_store_wind_data(run_date, cycle):
 #     print("✅ All locations processed.")
 
 # Optional: use this helper for batching
-def chunked(iterable, size):
-    for i in range(0, len(iterable), size):
-        yield iterable[i:i + size]
-
 @shared_task
-def interpolate_and_store_wind_data_15min(cycle = None , run_date = None):
-    # Get all unique lat/lon pairs
-    locations = WindData10m.objects.values_list('latitude', 'longitude').distinct()
+def interpolate_and_store_all_15min(cycle=None, run_date=None):
+    from django.db.models import Q
 
-    for lat, lon in locations:
-        # Stream data efficiently
-        qs = WindData10m.objects.filter(latitude=lat, longitude=lon).only("valid_time", "wind_speed").order_by("valid_time").iterator()
+    variable_map = {
+        'value': (Precipitation, PrecipitationInterpolated),
+        'value': (Radiation, RadiationInterpolated),
+        'value': (Temperature, TemperatureInterpolated),
+        'value': (TotalCloudCover, CloudCoverInterpolated),
+    }
 
-        data = [(obj.valid_time, obj.wind_speed) for obj in qs]
-        if len(data) < 4:
-            continue  # PCHIP needs at least 4 points
+    # ----- Scalar field interpolation -----
+    for field, (raw_model, interp_model) in variable_map.items():
+        print(f"📌 Interpolating: {raw_model.__name__}")
 
-        # Prepare DataFrame
-        df = pd.DataFrame(data, columns=['valid_time', 'wind_speed'])
-        df['valid_time'] = pd.to_datetime(df['valid_time'])
-        df.set_index('valid_time', inplace=True)
+        locations = raw_model.objects.values_list('latitude', 'longitude').distinct()
 
-        # Smoothing (optional)
-        df['wind_speed'] = df['wind_speed'].rolling(window=3, min_periods=1, center=True).mean()
+        for lat, lon in locations:
+            qs = raw_model.objects.filter(latitude=lat, longitude=lon).only("valid_time", field).order_by(
+                "valid_time").iterator()
+            data = [(obj.valid_time, getattr(obj, field)) for obj in qs if getattr(obj, field) is not None]
 
-        # Create 15-minute time index
-        new_time_index = pd.date_range(start=df.index.min(), end=df.index.max(), freq='15min')
+            if len(data) < 4:
+                continue
 
-        # Interpolate using PCHIP
-        interp = PchipInterpolator(df.index.astype(int) / 1e9, df['wind_speed'])
-        interpolated_values = interp(new_time_index.astype(int) / 1e9)
+            df = pd.DataFrame(data, columns=['valid_time', field])
+            df['valid_time'] = pd.to_datetime(df['valid_time'])
+            df.set_index('valid_time', inplace=True)
+            df[field] = df[field].rolling(window=3, min_periods=1, center=True).mean()
 
-        # Insert or update records
-        updated_count = 0
-        with transaction.atomic():
-            for ts, ws in zip(new_time_index, interpolated_values):
-                if pd.isnull(ws):
-                    continue
-                WindDataInterpolated.objects.update_or_create(
-                    valid_time=ts.to_pydatetime(),
-                    latitude=lat,
-                    longitude=lon,
-                    defaults={"wind_speed": round(float(ws), 2)}
-                )
-                updated_count += 1
+            new_time_index = pd.date_range(start=df.index.min(), end=df.index.max(), freq='15min')
 
-        print(f"✅ Interpolated & upserted lat={lat}, lon={lon} ({updated_count} records)")
+            try:
+                interp = PchipInterpolator(df.index.astype(int) / 1e9, df[field])
+                interpolated_values = interp(new_time_index.astype(int) / 1e9)
+            except Exception as e:
+                print(f"❌ PCHIP error at lat={lat}, lon={lon} for {raw_model.__name__}: {e}")
+                continue
+
+            updated_count = 0
+            with transaction.atomic():
+                for ts, val in zip(new_time_index, interpolated_values):
+                    if pd.isnull(val):
+                        continue
+                    interp_model.objects.update_or_create(
+                        valid_time=ts.to_pydatetime(),
+                        latitude=lat,
+                        longitude=lon,
+                        defaults={field: round(float(val), 2)}
+                    )
+                    updated_count += 1
+            print(f"✅ {raw_model.__name__} interpolated: lat={lat}, lon={lon} ({updated_count} records)")
+
+    # ----- Multi-level Wind Speed Interpolation -----
+    print(f"📌 Interpolating: wind_speed (multi-level)")
+    levels = WindComponent.objects.values_list('level', flat=True).distinct()
+
+    for level in levels:
+        locations = WindComponent.objects.filter(level=level).values_list('latitude', 'longitude').distinct()
+
+        for lat, lon in locations:
+            qs = WindComponent.objects.filter(latitude=lat, longitude=lon, level=level).only("valid_time", "u_value",
+                                                                                             "v_value").order_by(
+                "valid_time").iterator()
+            data = [
+                (obj.valid_time, np.sqrt(obj.u_value ** 2 + obj.v_value ** 2))
+                for obj in qs if obj.u_value is not None and obj.v_value is not None
+            ]
+
+            if len(data) < 4:
+                continue
+
+            df = pd.DataFrame(data, columns=['valid_time', 'wind_speed'])
+            df['valid_time'] = pd.to_datetime(df['valid_time'])
+            df.set_index('valid_time', inplace=True)
+            df['wind_speed'] = df['wind_speed'].rolling(window=3, min_periods=1, center=True).mean()
+
+            new_time_index = pd.date_range(start=df.index.min(), end=df.index.max(), freq='15min')
+
+            try:
+                interp = PchipInterpolator(df.index.astype(int) / 1e9, df['wind_speed'])
+                interpolated_values = interp(new_time_index.astype(int) / 1e9)
+            except Exception as e:
+                print(f"❌ PCHIP error at lat={lat}, lon={lon} for wind_speed ({level}): {e}")
+                continue
+
+            updated_count = 0
+            with transaction.atomic():
+                for ts, val in zip(new_time_index, interpolated_values):
+                    if pd.isnull(val):
+                        continue
+                    InterpolatedVariable.objects.update_or_create(
+                        valid_time=ts.to_pydatetime(),
+                        latitude=lat,
+                        longitude=lon,
+                        level=level,
+                        variable='wind_speed',
+                        defaults={"value": round(float(val), 2)}
+                    )
+                    updated_count += 1
+            print(f"✅ wind_speed interpolated: lat={lat}, lon={lon}, level={level} ({updated_count} records)")
+
+    # Cleanup .idx files if provided
     if run_date and cycle:
         delete_idx_files_for_cycle(run_date, cycle)
-    print("🎉 All locations processed successfully.")
+
+    print("🎉 All variables and levels processed successfully.")
+
 
 def delete_idx_files_for_cycle(run_date, cycle):
     folder_path = f"grib_data/{run_date}_{cycle}"
@@ -404,9 +693,6 @@ def delete_idx_files_for_cycle(run_date, cycle):
 #         print(f"✅ Interpolated and stored data for lat={lat}, lon={lon} ({len(interpolated_entries)} records)")
 #
 #     print("🎉 All locations processed successfully.")
-
-
-
 
 
 # @shared_task
