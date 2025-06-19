@@ -3,34 +3,35 @@ from collections import defaultdict
 from django.shortcuts import render
 import json
 
-from wind_data_processing.models import WindData10m, WindDataInterpolated
+from wind_data_processing.models import InterpolatedVariable
 
 
 def wind_trend_view(request):
-    # Example fixed location (you can make it dynamic)
+    lat, lon = 11.0, 77.25  # Example fixed location (can be dynamic)
 
-    # 11.024205, 77.006990
-    lat, lon = 11, 77
-
-    data = (
-        WindDataInterpolated.objects
-        .filter(latitude=lat, longitude=lon)
-        .order_by("valid_time")
-        .values("valid_time", "wind_speed")
+    # Fetch all wind_speed data at this location
+    records = (
+        InterpolatedVariable.objects
+        .filter(latitude=lat, longitude=lon, variable='wind_speed')
+        .order_by('valid_time')
+        .values('valid_time', 'value', 'level')
     )
 
-    # Group data by day
-    daily_data = defaultdict(lambda: {"times": [], "speeds": []})
-    for entry in data:
-        day = entry["valid_time"].date().isoformat()
-        time_str = entry["valid_time"].strftime("%H:%M")
-        wind_speed = float(entry["wind_speed"]) if entry["wind_speed"] is not None else 0.0
-        daily_data[day]["times"].append(time_str)
-        daily_data[day]["speeds"].append(round(wind_speed, 2))
+    # Structure: {level: {day: {"times": [...], "speeds": [...]}}}
+    data_by_level = defaultdict(lambda: defaultdict(lambda: {"times": [], "speeds": []}))
+
+    for entry in records:
+        level = entry["level"]
+        valid_time = entry["valid_time"]
+        day = valid_time.date().isoformat()
+        time_str = valid_time.strftime("%H:%M")
+        speed = float(entry["value"]) if entry["value"] is not None else 0.0
+        data_by_level[level][day]["times"].append(time_str)
+        data_by_level[level][day]["speeds"].append(round(speed, 2))
 
     context = {
-        "days": json.dumps(list(daily_data.keys())),
-        "data_by_day": json.dumps(daily_data),
         "location": f"{lat}, {lon}",
+        "data_by_level": json.dumps(data_by_level),
+        "levels": json.dumps(sorted(data_by_level.keys(), key=lambda x: float(x) if x.replace('.', '', 1).isdigit() else x)),
     }
     return render(request, "wind_trend/wind_trend.html", context)

@@ -2,19 +2,6 @@ from django.db import models
 
 
 # ---------- Raw Models Based on Provided Table ----------
-
-class WindData10m(models.Model):
-    valid_time = models.DateTimeField()
-    latitude = models.FloatField()
-    longitude = models.FloatField()
-    u_value = models.FloatField(null=True, default=None)
-    v_value = models.FloatField(null=True, default=None)
-    wind_speed = models.FloatField()
-
-    class Meta:
-        unique_together = ('valid_time', 'latitude', 'longitude')
-
-
 class WindComponent(models.Model):
     valid_time = models.DateTimeField()
     latitude = models.FloatField()
@@ -43,20 +30,22 @@ class CAPE(models.Model):
     valid_time = models.DateTimeField()
     latitude = models.FloatField()
     longitude = models.FloatField()
+    level = models.CharField(max_length=10, default=None)
     value = models.FloatField()
 
     class Meta:
-        unique_together = ('valid_time', 'latitude', 'longitude')
+        unique_together = ('valid_time', 'latitude', 'longitude','level')
 
 
 class Albedo(models.Model):
     valid_time = models.DateTimeField()
     latitude = models.FloatField()
     longitude = models.FloatField()
+    level = models.CharField(max_length=10,default=None)
     value = models.FloatField()
 
     class Meta:
-        unique_together = ('valid_time', 'latitude', 'longitude')
+        unique_together = ('valid_time', 'latitude', 'longitude','level')
 
 
 class Radiation(models.Model):
@@ -76,9 +65,10 @@ class WindGust(models.Model):
     latitude = models.FloatField()
     longitude = models.FloatField()
     value = models.FloatField()
+    level = models.CharField(max_length=10, default=None)
 
     class Meta:
-        unique_together = ('valid_time', 'latitude', 'longitude')
+        unique_together = ('valid_time', 'latitude', 'longitude','level')
 
 
 class Humidity(models.Model):
@@ -98,9 +88,10 @@ class SunshineDuration(models.Model):
     latitude = models.FloatField()
     longitude = models.FloatField()
     value = models.FloatField()
+    level = models.CharField(max_length=10,default=None)
 
     class Meta:
-        unique_together = ('valid_time', 'latitude', 'longitude')
+        unique_together = ('valid_time', 'latitude', 'longitude','level')
 
 
 class TotalCloudCover(models.Model):
@@ -128,20 +119,6 @@ class Temperature(models.Model):
 
 
 # ---------- Interpolated 15-Minute Models ----------
-
-class WindDataInterpolated(models.Model):
-    valid_time = models.DateTimeField(db_index=True)
-    latitude = models.FloatField(db_index=True)
-    longitude = models.FloatField(db_index=True)
-    level = models.CharField(max_length=50,default=None)  # e.g., 10m, 80m, 100m, 850mb, etc.
-    u_value = models.FloatField(null=True, default=None)
-    v_value = models.FloatField(null=True, default=None)
-    wind_speed = models.FloatField()
-
-    class Meta:
-        unique_together = ('valid_time', 'latitude', 'longitude')
-
-
 class PrecipitationInterpolated(models.Model):
     valid_time = models.DateTimeField()
     latitude = models.FloatField()
@@ -149,7 +126,8 @@ class PrecipitationInterpolated(models.Model):
     short_name = models.CharField(max_length=50, default=None)
     level = models.CharField(max_length=20,default=None)
     value = models.FloatField()
-
+    class Meta:
+        unique_together = ('valid_time', 'latitude', 'longitude', 'level','short_name')
 
 class RadiationInterpolated(models.Model):
     valid_time = models.DateTimeField()
@@ -158,6 +136,8 @@ class RadiationInterpolated(models.Model):
     short_name = models.CharField(max_length=50, default=None)
     level = models.CharField(max_length=20,default=None)
     value = models.FloatField()
+    class Meta:
+        unique_together = ('valid_time', 'latitude', 'longitude', 'level','short_name')
 
 
 class TemperatureInterpolated(models.Model):
@@ -183,9 +163,20 @@ class CloudCoverInterpolated(models.Model):
     class Meta:
         unique_together = ('valid_time', 'latitude', 'longitude', 'level')
 
+class InterpolatedVariable(models.Model):
+    valid_time = models.DateTimeField()
+    latitude = models.FloatField()
+    longitude = models.FloatField()
+    level = models.CharField(max_length=20,default=None)
+    variable = models.CharField(max_length=50,default=None)  # e.g., wind_speed, wind_gust, etc.
+    value = models.FloatField()
+
+    class Meta:
+        unique_together = ('valid_time', 'latitude', 'longitude', 'level', 'variable')
+
+
 
 # ---------- GRIB Cycle Status Tracker ----------
-
 class GRIBCycleStatus(models.Model):
     date = models.DateField()
     cycle_00 = models.CharField(max_length=20, default='pending')  # pending, completed, failed
@@ -202,14 +193,3 @@ class GRIBCycleStatus(models.Model):
             if getattr(self, f'cycle_{cycle}') != 'completed':
                 return cycle
         return None
-
-class InterpolatedVariable(models.Model):
-    valid_time = models.DateTimeField()
-    latitude = models.FloatField()
-    longitude = models.FloatField()
-    level = models.CharField(max_length=20,default=None)
-    variable = models.CharField(max_length=50,default=None)  # e.g., wind_speed, wind_gust, etc.
-    value = models.FloatField()
-
-    class Meta:
-        unique_together = ('valid_time', 'latitude', 'longitude', 'level', 'variable')

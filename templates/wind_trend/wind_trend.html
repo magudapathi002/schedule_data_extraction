@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Wind Speed Trend</title>
+    <title>Wind Speed Trend - Multi-Level</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
         body {
@@ -15,88 +15,100 @@
             text-align: center;
         }
 
-        .chart-container {
-            width: 90%;
-            max-width: 1200px;
-            margin: auto;
-        }
-
         .controls {
             text-align: center;
             margin: 20px 0;
+        }
+
+        .chart-container {
+            width: 95%;
+            max-width: 1200px;
+            margin: auto;
         }
     </style>
 </head>
 <body>
 
-<h2>Wind Speed Trend - Location: {{ location }}</h2>
+<h2>Wind Speed Trend - Multi-Level<br>Location: {{ location }}</h2>
 
-<!-- Controls: Day and Interval Selector -->
 <div class="controls">
-    <label for="daySelect" style="margin-right: 10px;">Select Day:</label>
-    <select id="daySelect" style="padding: 6px; margin-right: 30px;"></select>
+    <label for="levelSelect">Select Level:</label>
+    <select id="levelSelect" style="margin: 0 20px;"></select>
 
-    <label for="intervalSelect" style="margin-right: 10px;">Interval:</label>
-    <select id="intervalSelect" style="padding: 6px;">
+    <label for="daySelect">Select Day:</label>
+    <select id="daySelect" style="margin: 0 20px;"></select>
+
+    <label for="intervalSelect">Interval:</label>
+    <select id="intervalSelect">
         <option value="15">Every 15 Minutes</option>
         <option value="60">Every Hour</option>
     </select>
 </div>
 
-<!-- Chart -->
 <div class="chart-container">
     <canvas id="windChart"></canvas>
 </div>
 
 <script>
-    const dataByDay = {{ data_by_day|safe }};
-    const days = {{ days|safe }};
+    const rawData = {{ data_by_level|safe }};
+    const levels = {{ levels|safe }};
     const ctx = document.getElementById("windChart").getContext("2d");
 
+    const levelSelect = document.getElementById("levelSelect");
     const daySelect = document.getElementById("daySelect");
     const intervalSelect = document.getElementById("intervalSelect");
 
-    days.forEach(day => {
-        const option = document.createElement("option");
-        option.value = day;
-        option.textContent = day;
-        daySelect.appendChild(option);
+    // Populate level dropdown
+    levels.forEach(level => {
+        const opt = document.createElement("option");
+        opt.value = level;
+        opt.textContent = level;
+        levelSelect.appendChild(opt);
     });
 
     let windChart = null;
 
-    function filterByInterval(times, speeds, intervalMinutes) {
-        const filteredTimes = [];
-        const filteredSpeeds = [];
-
-        let lastIncluded = null;
-
-        for (let i = 0; i < times.length; i++) {
-            const time = new Date("1970-01-01T" + times[i] + "Z");  // UTC time parsing
-            if (!lastIncluded || (time - lastIncluded) >= intervalMinutes * 60 * 1000) {
-                filteredTimes.push(times[i]);
-                filteredSpeeds.push(speeds[i]);
-                lastIncluded = time;
-            }
-        }
-        return {times: filteredTimes, speeds: filteredSpeeds};
+    function populateDays(level) {
+        daySelect.innerHTML = "";
+        const days = Object.keys(rawData[level] || {});
+        days.forEach(day => {
+            const opt = document.createElement("option");
+            opt.value = day;
+            opt.textContent = day;
+            daySelect.appendChild(opt);
+        });
     }
 
-    function drawChart(day, interval) {
-        const rawData = dataByDay[day];
-        const filtered = filterByInterval(rawData["times"], rawData["speeds"], parseInt(interval));
+    function filterInterval(times, speeds, interval) {
+        const outTimes = [], outSpeeds = [];
+        let lastTime = null;
+
+        for (let i = 0; i < times.length; i++) {
+            const current = new Date("1970-01-01T" + times[i] + "Z");
+            if (!lastTime || (current - lastTime) >= interval * 60 * 1000) {
+                outTimes.push(times[i]);
+                outSpeeds.push(speeds[i]);
+                lastTime = current;
+            }
+        }
+        return {times: outTimes, speeds: outSpeeds};
+    }
+
+    function drawChart(level, day, interval) {
+        const dataset = rawData[level][day];
+        const {times, speeds} = filterInterval(dataset.times, dataset.speeds, parseInt(interval));
 
         if (windChart) windChart.destroy();
 
         windChart = new Chart(ctx, {
-            type: "line",
+            type: 'line',
             data: {
-                labels: filtered.times,
+                labels: times,
                 datasets: [{
-                    label: "Wind Speed (m/s)",
-                    data: filtered.speeds,
-                    borderColor: "rgba(54, 162, 235, 1)",
-                    backgroundColor: "rgba(54, 162, 235, 0.2)",
+                    label: `Wind Speed at ${level}`,
+                    data: speeds,
+                    borderColor: 'rgba(54, 162, 235, 1)',
+                    backgroundColor: 'rgba(54, 162, 235, 0.2)',
                     tension: 0.3,
                     fill: true,
                     pointRadius: 1.5
@@ -106,7 +118,11 @@
                 responsive: true,
                 scales: {
                     x: {
-                        title: {display: true, text: "Time of Day"},
+                        type: 'category',
+                        title: {
+                            display: true,
+                            text: "Time"
+                        },
                         ticks: {
                             autoSkip: false,
                             maxRotation: 60,
@@ -115,7 +131,10 @@
                     },
                     y: {
                         beginAtZero: true,
-                        title: {display: true, text: "Wind Speed (m/s)"}
+                        title: {
+                            display: true,
+                            text: "Wind Speed (m/s)"
+                        }
                     }
                 },
                 plugins: {
@@ -128,22 +147,33 @@
                     }
                 }
             }
+
         });
     }
 
-    // Initial chart
-    if (days.length > 0) {
-        drawChart(days[0], intervalSelect.value);
-        daySelect.value = days[0];
+    // Initial setup
+    if (levels.length > 0) {
+        const firstLevel = levels[0];
+        populateDays(firstLevel);
+        const firstDay = daySelect.options[0]?.value;
+        if (firstDay) drawChart(firstLevel, firstDay, intervalSelect.value);
+        levelSelect.value = firstLevel;
+        daySelect.value = firstDay;
     }
 
-    // Event listeners
-    daySelect.addEventListener("change", function () {
-        drawChart(this.value, intervalSelect.value);
+    levelSelect.addEventListener("change", () => {
+        const level = levelSelect.value;
+        populateDays(level);
+        const day = daySelect.options[0]?.value;
+        if (day) drawChart(level, day, intervalSelect.value);
     });
 
-    intervalSelect.addEventListener("change", function () {
-        drawChart(daySelect.value, this.value);
+    daySelect.addEventListener("change", () => {
+        drawChart(levelSelect.value, daySelect.value, intervalSelect.value);
+    });
+
+    intervalSelect.addEventListener("change", () => {
+        drawChart(levelSelect.value, daySelect.value, intervalSelect.value);
     });
 </script>
 
