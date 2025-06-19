@@ -263,13 +263,28 @@ def extract_and_store_all_variables(run_date, cycle):
 
 
 
+from collections import defaultdict
+from django.db import transaction
+import pandas as pd
+import numpy as np
+from scipy.interpolate import PchipInterpolator
+from celery import shared_task
+from .models import (
+    WindComponent, InterpolatedVariable,
+    Precipitation, PrecipitationInterpolated,
+    Radiation, RadiationInterpolated,
+    Temperature, TemperatureInterpolated,
+    TotalCloudCover, CloudCoverInterpolated,
+    CAPE, Albedo, WindGust, Humidity,
+    SunshineDuration
+)
+
 @shared_task
 def interpolate_and_store_all_15min(cycle=None, run_date=None):
-    print(f"📌 Interpolating: wind_speed (multi-level)")
+    print(f"\n📌 Interpolating: wind_speed (multi-level)")
     levels = WindComponent.objects.values_list('level', flat=True).distinct()
 
     for level in levels:
-        # Fetch all data for this level at once
         data = WindComponent.objects.filter(level=level).values(
             'valid_time', 'latitude', 'longitude', 'u_value', 'v_value'
         )
@@ -285,38 +300,33 @@ def interpolate_and_store_all_15min(cycle=None, run_date=None):
             if len(time_series) < 4:
                 continue
 
+            time_series.sort()
             df = pd.DataFrame(time_series, columns=['valid_time', 'wind_speed']).set_index('valid_time')
             df['wind_speed'] = df['wind_speed'].rolling(window=3, min_periods=1, center=True).mean()
             new_time_index = pd.date_range(start=df.index.min(), end=df.index.max(), freq='15min')
 
             try:
-                interp = PchipInterpolator(df.index.astype(int) / 1e9, df['wind_speed'])
-                interpolated_values = interp(new_time_index.astype(int) / 1e9)
+                interp = PchipInterpolator(df.index.astype(np.int64) / 1e9, df['wind_speed'])
+                interpolated_values = interp(new_time_index.astype(np.int64) / 1e9)
             except Exception as e:
                 print(f"❌ PCHIP error at lat={lat}, lon={lon} for wind_speed (level={level}): {e}")
                 continue
 
-            objects = []
-            for ts, val in zip(new_time_index, interpolated_values):
-                if pd.isnull(val):
-                    continue
-                obj = InterpolatedVariable(
+            objects = [
+                InterpolatedVariable(
                     valid_time=ts.to_pydatetime(),
                     latitude=lat,
                     longitude=lon,
                     level=level,
                     variable='wind_speed',
                     value=round(float(val), 2)
-                )
-                objects.append(obj)
+                ) for ts, val in zip(new_time_index, interpolated_values) if not pd.isnull(val)
+            ]
 
             with transaction.atomic():
                 InterpolatedVariable.objects.bulk_create(objects, ignore_conflicts=True)
                 existing = InterpolatedVariable.objects.filter(
-                    variable='wind_speed',
-                    level=level,
-                    latitude=lat,
-                    longitude=lon,
+                    variable='wind_speed', level=level, latitude=lat, longitude=lon,
                     valid_time__in=[obj.valid_time for obj in objects]
                 )
                 existing_map = {
@@ -332,6 +342,7 @@ def interpolate_and_store_all_15min(cycle=None, run_date=None):
                 InterpolatedVariable.objects.bulk_update(updatable, ['value'])
 
             print(f"✅ wind_speed interpolated: lat={lat}, lon={lon}, level={level} ({len(objects)} records)")
+
     variable_map = {
         'precipitation': ('value', Precipitation, PrecipitationInterpolated, ['short_name', 'level']),
         'radiation': ('value', Radiation, RadiationInterpolated, ['short_name', 'level']),
@@ -354,41 +365,36 @@ def interpolate_and_store_all_15min(cycle=None, run_date=None):
             if len(data) < 4:
                 continue
 
+            data.sort()
             df = pd.DataFrame(data, columns=['valid_time', field]).set_index('valid_time')
             df[field] = df[field].rolling(window=3, min_periods=1, center=True).mean()
             new_time_index = pd.date_range(start=df.index.min(), end=df.index.max(), freq='15min')
 
             try:
-                interp = PchipInterpolator(df.index.astype(int) / 1e9, df[field])
-                interpolated_values = interp(new_time_index.astype(int) / 1e9)
+                interp = PchipInterpolator(df.index.astype(np.int64) / 1e9, df[field])
+                interpolated_values = interp(new_time_index.astype(np.int64) / 1e9)
             except Exception as e:
                 print(f"❌ PCHIP error at {loc} for {raw_model.__name__}: {e}")
                 continue
 
-            objects = []
-            for ts, val in zip(new_time_index, interpolated_values):
-                if pd.isnull(val):
-                    continue
-                obj = interp_model(
+            objects = [
+                interp_model(
                     valid_time=ts.to_pydatetime(),
                     latitude=lat,
                     longitude=lon,
                     **dict(zip(extra_fields, extras)),
                     **{field: round(float(val), 2)}
-                )
-                objects.append(obj)
+                ) for ts, val in zip(new_time_index, interpolated_values) if not pd.isnull(val)
+            ]
 
             with transaction.atomic():
                 interp_model.objects.bulk_create(objects, ignore_conflicts=True)
                 existing = interp_model.objects.filter(
-                    latitude=lat,
-                    longitude=lon,
+                    latitude=lat, longitude=lon,
                     valid_time__in=[obj.valid_time for obj in objects],
                     **dict(zip(extra_fields, extras))
                 )
-                existing_map = {
-                    obj.valid_time: obj for obj in existing
-                }
+                existing_map = {obj.valid_time: obj for obj in existing}
                 updatable = []
                 for obj in objects:
                     if obj.valid_time in existing_map:
@@ -425,37 +431,33 @@ def interpolate_and_store_all_15min(cycle=None, run_date=None):
             if len(data) < 4:
                 continue
 
+            data.sort()
             df = pd.DataFrame(data, columns=['valid_time', 'value']).set_index('valid_time')
             df['value'] = df['value'].rolling(window=3, min_periods=1, center=True).mean()
             new_time_index = pd.date_range(start=df.index.min(), end=df.index.max(), freq='15min')
 
             try:
-                interp = PchipInterpolator(df.index.astype(int) / 1e9, df['value'])
-                interpolated_values = interp(new_time_index.astype(int) / 1e9)
+                interp = PchipInterpolator(df.index.astype(np.int64) / 1e9, df['value'])
+                interpolated_values = interp(new_time_index.astype(np.int64) / 1e9)
             except Exception as e:
                 print(f"❌ PCHIP error at {loc} for {variable_name}: {e}")
                 continue
 
-            objects = []
-            for ts, val in zip(new_time_index, interpolated_values):
-                if pd.isnull(val):
-                    continue
-                obj = InterpolatedVariable(
+            objects = [
+                InterpolatedVariable(
                     valid_time=ts.to_pydatetime(),
                     latitude=lat,
                     longitude=lon,
                     level=extras[0] if extra_fields and 'level' in extra_fields else None,
                     variable=variable_name,
                     value=round(float(val), 2)
-                )
-                objects.append(obj)
+                ) for ts, val in zip(new_time_index, interpolated_values) if not pd.isnull(val)
+            ]
 
             with transaction.atomic():
                 InterpolatedVariable.objects.bulk_create(objects, ignore_conflicts=True)
                 existing = InterpolatedVariable.objects.filter(
-                    variable=variable_name,
-                    latitude=lat,
-                    longitude=lon,
+                    variable=variable_name, latitude=lat, longitude=lon,
                     valid_time__in=[obj.valid_time for obj in objects]
                 )
                 if extra_fields and 'level' in extra_fields:
@@ -474,4 +476,4 @@ def interpolate_and_store_all_15min(cycle=None, run_date=None):
 
             print(f"✅ {variable_name} interpolated: {loc} ({len(objects)} records)")
 
-    print(" All scalar variable interpolations completed successfully.")
+    print("✅ All scalar variable interpolations completed successfully.")
