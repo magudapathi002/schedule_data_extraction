@@ -1,0 +1,36 @@
+<!-- templates/wind_query.html -->
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Wind Speed Forecast</title>
+</head>
+<body>
+<h2>Wind Speed Forecast Query</h2>
+<form method="post">
+  {% csrf_token %}
+  {{ form.as_p }}
+  <button type="submit" name="action" value="view">View</button>
+  <button type="submit" name="action" value="download">Download Excel</button>
+</form>
+
+{% if results %}
+    <h3>Results</h3>
+    <table border="1">
+        <tr>
+            <th>DateTime</th>
+            <th>Latitude</th>
+            <th>Longitude</th>
+            <th>Wind Speed</th>
+        </tr>
+        {% for row in results %}
+            <tr>
+                <td>{{ row.valid_time }}</td>
+                <td>{{ row.latitude }}</td>
+                <td>{{ row.longitude }}</td>
+                <td>{{ row.value }}</td>
+            </tr>
+        {% endfor %}
+    </table>
+{% endif %}
+</body>
+</html>

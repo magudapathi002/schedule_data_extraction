@@ -8,9 +8,12 @@ import numpy as np
 from celery import shared_task
 from django.db import transaction
 from scipy.interpolate import PchipInterpolator
-from .utils import get_or_create_today_status, bulk_insert_and_update
-from .models import SunshineDuration, WindGust, Radiation, Precipitation, PrecipitationInterpolated, \
-    RadiationInterpolated, TemperatureInterpolated, Temperature, CloudCoverInterpolated, TotalCloudCover, WindComponent, \
+
+from .docs import TemperatureGribItem, HumidityGribItem, TotalCloudCoverGribItem, PrecipitationGribItem, \
+    RadiationGribItem, WindGustGribItem, SunshineDurationGribItem, CAPE_GribItem, AlbedoGribItem, gfs_model_base_url, \
+    forecast_hours, variable_map, generic_models, wind_component_pairs
+from .utils import get_or_create_today_status, bulk_insert_and_update, process_scalar
+from .models import SunshineDuration, WindGust, Radiation, Precipitation, Temperature, TotalCloudCover, WindComponent, \
     InterpolatedVariable, Albedo, CAPE, Humidity
 
 from requests.adapters import HTTPAdapter
@@ -20,7 +23,6 @@ import pygrib
 
 @shared_task
 def download_cycle_grib_files(run_date=None, cycle=None, retry_count=0):
-    base_url = "https://nomads.ncep.noaa.gov/cgi-bin/filter_gfs_0p25.pl"
     run_date = run_date or datetime.now(timezone.utc).strftime('%Y%m%d')
     today_status = get_or_create_today_status()
 
@@ -33,8 +35,6 @@ def download_cycle_grib_files(run_date=None, cycle=None, retry_count=0):
 
     save_dir = f"grib_data/{run_date}_{cycle}"
     os.makedirs(save_dir, exist_ok=True)
-
-    forecast_hours = list(range(0, 121)) + list(range(123, 385, 3))
     total_files = len(forecast_hours)
 
     session = requests.Session()
@@ -84,16 +84,16 @@ def download_cycle_grib_files(run_date=None, cycle=None, retry_count=0):
             "var_UGRD": "on",
             "var_VGRD": "on",
             "subregion": '',
-            "toplat": 11.52,
-            "leftlon": 76.39,
-            "rightlon": 77.29,
-            "bottomlat": 10.37,
+            "toplat": 13.58,
+            "leftlon": 76.25,
+            "rightlon": 80.33,
+            "bottomlat": 8.05,
             "dir": f"/gfs.{run_date}/{cycle}/atmos"
         }
 
         print(f"⬇️ Downloading {filename}...")
         try:
-            response = session.get(base_url, params=params, stream=True, timeout=60)
+            response = session.get(gfs_model_base_url, params=params, stream=True, timeout=60)
             if response.status_code == 200:
                 with open(out_path, "wb") as f:
                     for chunk in response.iter_content(chunk_size=8192):
@@ -142,118 +142,47 @@ def extract_and_store_all_variables(run_date, cycle):
         file_path = os.path.join(data_dir, file)
         try:
             grbs = pygrib.open(file_path)
-
             # --- Wind Components ---
-            wind_levels = [
-                ("10 metre U wind component", "heightAboveGround", 10),
-                ("10 metre V wind component", "heightAboveGround", 10),
-                ("U component of wind", "heightAboveGround", 80),
-                ("V component of wind", "heightAboveGround", 80),
-                ("100 metre U wind component", "heightAboveGround", 100),
-                ("100 metre V wind component", "heightAboveGround", 100),
-                ("U component of wind", "isobaricInhPa", 850),
-                ("V component of wind", "isobaricInhPa", 850),
-                ("U component of wind", "isobaricInhPa", 600),
-                ("V component of wind", "isobaricInhPa", 600),
-            ]
-
-            for level_name, level_type, level_val in wind_levels:
+            for u_name, v_name, level_type, level_val in wind_component_pairs:
                 try:
-                    grb = grbs.select(name=level_name, typeOfLevel=level_type, level=level_val)[0]
-                    data, lats, lons = grb.data()
-                    valid_time = grb.validDate
+                    u_grb = grbs.select(name=u_name, typeOfLevel=level_type, level=level_val)[0]
+                    v_grb = grbs.select(name=v_name, typeOfLevel=level_type, level=level_val)[0]
 
-                    u_or_v = 'u_value' if 'U' in level_name else 'v_value'
+                    u_data, lats, lons = u_grb.data()
+                    v_data, _, _ = v_grb.data()
+                    valid_time = u_grb.validDate
+
                     objects = []
                     for i in range(lats.shape[0]):
                         for j in range(lats.shape[1]):
-                            kwargs = {
-                                'valid_time': valid_time,
-                                'latitude': float(lats[i, j]),
-                                'longitude': float(lons[i, j]),
-                                'level': level_val,
-                                u_or_v: float(data[i, j])
-                            }
-                            obj = WindComponent(**kwargs)
+                            obj = WindComponent(
+                                valid_time=valid_time,
+                                latitude=float(lats[i, j]),
+                                longitude=float(lons[i, j]),
+                                level=level_val,
+                                u_value=float(u_data[i, j]),
+                                v_value=float(v_data[i, j]),
+                            )
                             objects.append(obj)
-
-                    bulk_insert_and_update(WindComponent, objects, ['valid_time', 'latitude', 'longitude', 'level'], [u_or_v])
+                    bulk_insert_and_update(
+                        WindComponent,
+                        objects,
+                        ['valid_time', 'latitude', 'longitude', 'level'],
+                        ['u_value', 'v_value']
+                    )
+                    print(f"✅ Wind data stored: level={level_val}, type={level_type}")
                 except Exception as e:
-                    print(f"❌ Error storing wind at {level_name}: {e}")
+                    print(f"❌ Error storing wind components at level={level_val} ({level_type}): {e}")
 
-            # --- Repeat for scalar fields ---
-            def process_scalar(model, grib_items, short_name_field=None):
-                for name, level_type, level_val, short_name in grib_items:
-                    try:
-                        grb = grbs.select(name=name, typeOfLevel=level_type, level=level_val)[0]
-                        data, lats, lons = grb.data()
-                        valid_time = grb.validDate
-
-                        objects = []
-                        for i in range(lats.shape[0]):
-                            for j in range(lats.shape[1]):
-                                obj = model(
-                                    valid_time=valid_time,
-                                    latitude=float(lats[i, j]),
-                                    longitude=float(lons[i, j]),
-                                    level=level_val,
-                                    **({short_name_field: short_name} if short_name_field else {}),
-                                    value=float(data[i, j])
-                                )
-                                objects.append(obj)
-
-                        unique_fields = ['valid_time', 'latitude', 'longitude']
-                        if short_name_field:
-                            unique_fields.append(short_name_field)
-                        if model != SunshineDuration and model != WindGust and model != CAPE and model != Albedo:
-                            unique_fields.append('level')
-
-                        bulk_insert_and_update(model, objects, unique_fields, ['value'])
-                    except Exception as e:
-                        print(f"⚠️ Skipping {model.__name__} {name}: {e}")
-
-            # Temperature
-            process_scalar(Temperature, [
-                ("Temperature", "surface", 0, "t_surface"),
-                ("2 metre temperature", "heightAboveGround", 2, "t2m"),
-                ("Maximum temperature", "heightAboveGround", 2, "tmax"),
-                ("Minimum temperature", "heightAboveGround", 2, "tmin"),
-            ], short_name_field='short_name')
-
-            # Humidity
-            process_scalar(Humidity, [("2 metre relative humidity", "heightAboveGround", 2, "r2")], short_name_field='short_name')
-
-            # Cloud Cover
-            process_scalar(TotalCloudCover, [
-                ("Total Cloud Cover", "isobaricInhPa", 850, "tcc850"),
-                ("Total Cloud Cover", "isobaricInhPa", 800, "tcc800")
-            ], short_name_field='short_name')
-
-            # Precipitation
-            process_scalar(Precipitation, [
-                ("Convective precipitation (water)", "surface", 0, "acpcp"),
-                ("Convective precipitation rate", "surface", 0, "cprat"),
-                ("Precipitation rate", "surface", 0, "prate"),
-            ], short_name_field='short_name')
-
-            # Radiation
-            process_scalar(Radiation, [
-                ("Downward long-wave radiation flux", "surface", 0, "dlwrf"),
-                ("Downward short-wave radiation flux", "surface", 0, "dswrf"),
-            ], short_name_field='short_name')
-
-            # Wind Gust
-            process_scalar(WindGust, [("Wind speed (gust)", "surface", 0, None)])
-
-            # Sunshine Duration
-            process_scalar(SunshineDuration, [("Sunshine Duration", "surface", 0, None)])
-
-            # CAPE
-            process_scalar(CAPE, [("Convective available potential energy", "surface", 0, None)])
-
-            # Albedo
-            process_scalar(Albedo, [("Forecast albedo", "surface", 0, None)])
-
+            process_scalar(Temperature, TemperatureGribItem, short_name_field='short_name', grbs=grbs)
+            process_scalar(Humidity, HumidityGribItem, short_name_field='short_name', grbs=grbs)
+            process_scalar(TotalCloudCover, TotalCloudCoverGribItem, short_name_field='short_name', grbs=grbs)
+            process_scalar(Precipitation, PrecipitationGribItem, short_name_field='short_name', grbs=grbs)
+            process_scalar(Radiation, RadiationGribItem, short_name_field='short_name', grbs=grbs)
+            process_scalar(WindGust, WindGustGribItem, grbs=grbs)
+            process_scalar(SunshineDuration, SunshineDurationGribItem, grbs=grbs)
+            process_scalar(CAPE, CAPE_GribItem, grbs=grbs)
+            process_scalar(Albedo, AlbedoGribItem, grbs=grbs)
             print(f"✅ Parsed and stored: {file}")
 
         except Exception as e:
@@ -261,23 +190,6 @@ def extract_and_store_all_variables(run_date, cycle):
 
     interpolate_and_store_all_15min.delay()
 
-
-
-from collections import defaultdict
-from django.db import transaction
-import pandas as pd
-import numpy as np
-from scipy.interpolate import PchipInterpolator
-from celery import shared_task
-from .models import (
-    WindComponent, InterpolatedVariable,
-    Precipitation, PrecipitationInterpolated,
-    Radiation, RadiationInterpolated,
-    Temperature, TemperatureInterpolated,
-    TotalCloudCover, CloudCoverInterpolated,
-    CAPE, Albedo, WindGust, Humidity,
-    SunshineDuration
-)
 
 @shared_task
 def interpolate_and_store_all_15min(cycle=None, run_date=None):
@@ -343,13 +255,6 @@ def interpolate_and_store_all_15min(cycle=None, run_date=None):
 
             print(f"✅ wind_speed interpolated: lat={lat}, lon={lon}, level={level} ({len(objects)} records)")
 
-    variable_map = {
-        'precipitation': ('value', Precipitation, PrecipitationInterpolated, ['short_name', 'level']),
-        'radiation': ('value', Radiation, RadiationInterpolated, ['short_name', 'level']),
-        'temperature': ('value', Temperature, TemperatureInterpolated, ['short_name', 'level']),
-        'cloud_cover': ('value', TotalCloudCover, CloudCoverInterpolated, ['level', 'short_name']),
-    }
-
     for var_name, (field, raw_model, interp_model, extra_fields) in variable_map.items():
         print(f" Interpolating: {raw_model.__name__}")
         distinct_fields = ['latitude', 'longitude'] + extra_fields
@@ -403,14 +308,6 @@ def interpolate_and_store_all_15min(cycle=None, run_date=None):
                 interp_model.objects.bulk_update(updatable, [field])
 
             print(f"✅ {raw_model.__name__} interpolated: {loc} ({len(objects)} records)")
-
-    generic_models = [
-        (CAPE, 'cape', None),
-        (Albedo, 'albedo', None),
-        (WindGust, 'wind_gust', None),
-        (Humidity, 'humidity', ['level', 'short_name']),
-        (SunshineDuration, 'sunshine_duration', None),
-    ]
 
     for model, variable_name, extra_fields in generic_models:
         print(f" Interpolating: {variable_name}")
