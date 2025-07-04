@@ -4,8 +4,8 @@ from wind_data_processing.models import Precipitation, PrecipitationInterpolated
     SunshineDuration
 
 gfs_model_base_url = "https://nomads.ncep.noaa.gov/cgi-bin/filter_gfs_0p25.pl"
-# forecast_hours = list(range(0, 121)) + list(range(123, 385, 3))
-forecast_hours = list(range(0, 72))
+forecast_hours = list(range(0, 121)) + list(range(123, 385, 3))
+# forecast_hours = list(range(0, 72))
 
 # Variable Essentials
 wind_component_pairs = [
@@ -58,9 +58,9 @@ variable_map = {
     }
 
 generic_models = [
-    (CAPE, 'cape', None),
-    (Albedo, 'albedo', None),
-    (WindGust, 'wind_gust', None),
+    (CAPE, 'cape', ['level']),
+    (Albedo, 'albedo',  ['level']),
+    (WindGust, 'wind_gust',  ['level']),
     (Humidity, 'humidity', ['level', 'short_name']),
-    (SunshineDuration, 'sunshine_duration', None),
+    (SunshineDuration, 'sunshine_duration',  ['level']),
 ]

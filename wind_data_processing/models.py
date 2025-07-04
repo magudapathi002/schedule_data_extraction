@@ -9,6 +9,8 @@ class WindComponent(models.Model):
     level = models.CharField(max_length=50)  # e.g., 10m, 80m, 100m, 850mb, etc.
     u_value = models.FloatField()
     v_value = models.FloatField()
+    wind_speed = models.FloatField(default=None)
+    wind_direction = models.FloatField(default=None)
 
     class Meta:
         unique_together = ('valid_time', 'latitude', 'longitude', 'level')

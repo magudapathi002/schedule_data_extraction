@@ -46,6 +46,7 @@
 </div>
 
 <div class="chart-container">
+    <button id="exportCSVBtn" style="margin-left: 20px;">Export CSV</button>
     <canvas id="windChart"></canvas>
 </div>
 
@@ -95,61 +96,79 @@
     }
 
     function drawChart(level, day, interval) {
-        const dataset = rawData[level][day];
-        const {times, speeds} = filterInterval(dataset.times, dataset.speeds, parseInt(interval));
+    const dataset = rawData[level][day];
+    const { times, speeds } = filterInterval(dataset.times, dataset.speeds, parseInt(interval));
 
-        if (windChart) windChart.destroy();
+    if (windChart) windChart.destroy();
 
-        windChart = new Chart(ctx, {
-            type: 'line',
-            data: {
-                labels: times,
-                datasets: [{
-                    label: `Wind Speed at ${level}`,
-                    data: speeds,
-                    borderColor: 'rgba(54, 162, 235, 1)',
-                    backgroundColor: 'rgba(54, 162, 235, 0.2)',
-                    tension: 0.3,
-                    fill: true,
-                    pointRadius: 1.5
-                }]
-            },
-            options: {
-                responsive: true,
-                scales: {
-                    x: {
-                        type: 'category',
-                        title: {
-                            display: true,
-                            text: "Time"
-                        },
-                        ticks: {
-                            autoSkip: false,
-                            maxRotation: 60,
-                            minRotation: 45
-                        }
+    windChart = new Chart(ctx, {
+        type: 'line',
+        data: {
+            labels: times,
+            datasets: [{
+                label: `Wind Speed at ${level}`,
+                data: speeds,
+                borderColor: 'rgba(54, 162, 235, 1)',
+                backgroundColor: 'rgba(54, 162, 235, 0.2)',
+                tension: 0.3,
+                fill: true,
+                pointRadius: 1.5
+            }]
+        },
+        options: {
+            responsive: true,
+            scales: {
+                x: {
+                    type: 'category',
+                    title: {
+                        display: true,
+                        text: "Time"
                     },
-                    y: {
-                        beginAtZero: true,
-                        title: {
-                            display: true,
-                            text: "Wind Speed (m/s)"
-                        }
+                    ticks: {
+                        autoSkip: false,
+                        maxRotation: 60,
+                        minRotation: 45
                     }
                 },
-                plugins: {
-                    tooltip: {
-                        callbacks: {
-                            label: function (context) {
-                                return context.dataset.label + ": " + parseFloat(context.parsed.y).toFixed(2) + " m/s";
-                            }
+                y: {
+                    beginAtZero: true,
+                    title: {
+                        display: true,
+                        text: "Wind Speed (m/s)"
+                    }
+                }
+            },
+            plugins: {
+                tooltip: {
+                    callbacks: {
+                        label: function (context) {
+                            return context.dataset.label + ": " + parseFloat(context.parsed.y).toFixed(2) + " m/s";
                         }
                     }
                 }
             }
+        }
+    });
 
-        });
-    }
+    // ⚡ Setup export logic on button click
+    document.getElementById("exportCSVBtn").onclick = function () {
+        let csvContent = "data:text/csv;charset=utf-8,";
+        csvContent += "Time,Wind Speed (m/s)\n";
+
+        for (let i = 0; i < times.length; i++) {
+            csvContent += `${times[i]},${speeds[i].toFixed(2)}\n`;
+        }
+
+        const encodedUri = encodeURI(csvContent);
+        const link = document.createElement("a");
+        link.setAttribute("href", encodedUri);
+        link.setAttribute("download", `wind_speed_${level}_${day}_interval${interval}.csv`);
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+    };
+}
+
 
     // Initial setup
     if (levels.length > 0) {

@@ -1,36 +1,332 @@
-<!-- templates/wind_query.html -->
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-    <title>Wind Speed Forecast</title>
+  <meta charset="UTF-8">
+  <title>Wind Speed Forecast</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+  <style>
+    body {
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      background-color: #eef2f7;
+      margin: 0;
+      padding: 30px;
+    }
+
+    h2 {
+      color: #1e2a38;
+      text-align: center;
+      font-size: 32px;
+      margin-bottom: 30px;
+    }
+
+    .container {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 20px;
+      justify-content: center;
+      align-items: stretch;
+    }
+
+    #map {
+      height: 100%;
+      min-height: 400px;
+      flex: 1 1 55%;
+      min-width: 320px;
+      border-radius: 12px;
+      box-shadow: 0 4px 10px rgba(0, 0, 0, 0.2);
+    }
+
+    form {
+      background-color: #ffffff;
+      padding: 20px 25px;
+      flex: 1 1 35%;
+      min-width: 260px;
+      border-radius: 12px;
+      box-shadow: 0 6px 18px rgba(0, 0, 0, 0.1);
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+    }
+
+    form p {
+      margin-bottom: 15px;
+    }
+
+    label {
+      display: block;
+      font-weight: 600;
+      margin-bottom: 5px;
+      color: #2c3e50;
+    }
+
+    input[type="text"],
+    input[type="number"],
+    input[type="datetime-local"],
+    select {
+      width: 100%;
+      padding: 8px 10px;
+      border: 1px solid #ccc;
+      border-radius: 6px;
+      font-size: 14px;
+      transition: border-color 0.3s ease;
+      background-color: #fff;
+    }
+
+    input:focus,
+    select:focus {
+      border-color: #3498db;
+      outline: none;
+    }
+
+    .datetime-group {
+      display: flex;
+      gap: 10px;
+    }
+
+    .datetime-group div {
+      flex: 1;
+    }
+
+    button {
+      padding: 10px 20px;
+      margin-top: 12px;
+      border: none;
+      background: linear-gradient(to right, #3498db, #2980b9);
+      color: white;
+      font-weight: bold;
+      font-size: 14px;
+      border-radius: 6px;
+      cursor: pointer;
+      transition: transform 0.2s ease, box-shadow 0.3s ease;
+    }
+
+    button:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 4px 12px rgba(52, 152, 219, 0.4);
+    }
+
+    h3 {
+      text-align: center;
+      margin-top: 50px;
+      color: #2d3e50;
+      font-size: 24px;
+    }
+
+    table {
+      border-collapse: collapse;
+      width: 90%;
+      margin: 30px auto;
+      background-color: #fff;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.05);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+
+    th, td {
+      padding: 14px 18px;
+      border: 1px solid #e0e0e0;
+      text-align: center;
+      font-size: 15px;
+    }
+
+    th {
+      background-color: #34495e;
+      color: white;
+      font-size: 16px;
+    }
+
+    tr:nth-child(even) {
+      background-color: #f8f9fa;
+    }
+
+    tr:hover {
+      background-color: #e8f4ff;
+    }
+
+    .toast {
+      position: fixed;
+      bottom: 30px;
+      left: 50%;
+      transform: translateX(-50%);
+      background-color: #e74c3c;
+      color: white;
+      padding: 14px 24px;
+      border-radius: 8px;
+      font-weight: 500;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+      z-index: 9999;
+      animation: fadein 0.5s, fadeout 0.5s 2.5s;
+    }
+
+    @keyframes fadein {
+      from { bottom: 10px; opacity: 0; }
+      to { bottom: 30px; opacity: 1; }
+    }
+
+    @keyframes fadeout {
+      from { bottom: 30px; opacity: 1; }
+      to { bottom: 10px; opacity: 0; }
+    }
+  </style>
 </head>
 <body>
-<h2>Wind Speed Forecast Query</h2>
-<form method="post">
-  {% csrf_token %}
-  {{ form.as_p }}
-  <button type="submit" name="action" value="view">View</button>
-  <button type="submit" name="action" value="download">Download Excel</button>
-</form>
 
+<h2>Wind Speed Forecast Query</h2>
+
+<div class="container">
+  <!-- Map -->
+  <div id="map"></div>
+
+  <!-- Form -->
+  <form method="post">
+    {% csrf_token %}
+    <p>
+      <label for="id_latitudes">Latitude</label>
+      {{ form.latitudes }}
+    </p>
+    <p>
+      <label for="id_longitudes">Longitude</label>
+      {{ form.longitudes }}
+    </p>
+    <p>
+      <label for="id_level">Level</label>
+      {{ form.level }}
+    </p>
+    <div class="datetime-group">
+      <div>
+        <label for="id_from_datetime">From</label>
+        {{ form.from_datetime }}
+      </div>
+      <div>
+        <label for="id_to_datetime">To</label>
+        {{ form.to_datetime }}
+      </div>
+    </div>
+    <div style="margin-top: auto;">
+      <button type="submit" name="action" value="view">View</button>
+      <button type="submit" name="action" value="download">Download Excel</button>
+    </div>
+  </form>
+</div>
+
+<!-- Toast -->
+<div id="toast" class="toast" style="display: none;">Placeholder message</div>
+
+<!-- Results -->
 {% if results %}
-    <h3>Results</h3>
-    <table border="1">
-        <tr>
-            <th>DateTime</th>
-            <th>Latitude</th>
-            <th>Longitude</th>
-            <th>Wind Speed</th>
-        </tr>
-        {% for row in results %}
-            <tr>
-                <td>{{ row.valid_time }}</td>
-                <td>{{ row.latitude }}</td>
-                <td>{{ row.longitude }}</td>
-                <td>{{ row.value }}</td>
-            </tr>
-        {% endfor %}
-    </table>
+  <h3>Results</h3>
+  <table>
+    <tr>
+      <th>DateTime</th>
+      <th>Latitude</th>
+      <th>Longitude</th>
+      <th>Wind Speed</th>
+    </tr>
+    {% for row in results %}
+      <tr>
+        <td>{{ row.valid_time }}</td>
+        <td>{{ row.latitude }}</td>
+        <td>{{ row.longitude }}</td>
+        <td>{{ row.value }}</td>
+      </tr>
+    {% endfor %}
+  </table>
 {% endif %}
+
+<script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+<script>
+  const bounds = L.latLngBounds([8.05, 76.25], [13.58, 80.33]);
+  const defaultCenter = [11.5, 78.3];
+
+  const map = L.map('map', {
+    center: defaultCenter,
+    zoom: 7,
+    maxBounds: bounds,
+    maxBoundsViscosity: 1.0
+  });
+
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '&copy; OpenStreetMap contributors'
+  }).addTo(map);
+
+  const latInput = document.querySelector('input[name="latitudes"]');
+  const lonInput = document.querySelector('input[name="longitudes"]');
+  const toast = document.getElementById('toast');
+
+  function showToast(message) {
+    toast.textContent = message;
+    toast.style.display = 'block';
+    setTimeout(() => {
+      toast.style.display = 'none';
+    }, 3000);
+  }
+
+  const marker = L.marker(defaultCenter, { draggable: true }).addTo(map);
+
+  function updateInputs(lat, lon) {
+    latInput.value = lat.toFixed(4);
+    lonInput.value = lon.toFixed(4);
+  }
+
+  function checkBoundsAndSet(lat, lon) {
+    const point = L.latLng(lat, lon);
+    if (!bounds.contains(point)) {
+      showToast("This location is outside the allowed perimeter.");
+      marker.setLatLng(defaultCenter);
+      updateInputs(...defaultCenter);
+      map.setView(defaultCenter, 7);
+      return false;
+    }
+    return true;
+  }
+
+  // ✅ Use onBlur instead of input event
+  latInput.addEventListener('blur', () => {
+    const lat = parseFloat(latInput.value);
+    const lon = parseFloat(lonInput.value);
+    if (!isNaN(lat) && !isNaN(lon) && checkBoundsAndSet(lat, lon)) {
+      marker.setLatLng([lat, lon]);
+      map.setView([lat, lon], 9);
+    }
+  });
+
+  lonInput.addEventListener('blur', () => {
+    const lat = parseFloat(latInput.value);
+    const lon = parseFloat(lonInput.value);
+    if (!isNaN(lat) && !isNaN(lon) && checkBoundsAndSet(lat, lon)) {
+      marker.setLatLng([lat, lon]);
+      map.setView([lat, lon], 9);
+    }
+  });
+
+  map.on('click', (e) => {
+    const { lat, lng } = e.latlng;
+    if (checkBoundsAndSet(lat, lng)) {
+      marker.setLatLng([lat, lng]);
+      updateInputs(lat, lng);
+    }
+  });
+
+  marker.on('dragend', () => {
+    const { lat, lng } = marker.getLatLng();
+    if (checkBoundsAndSet(lat, lng)) {
+      updateInputs(lat, lng);
+    }
+  });
+
+  window.onload = () => {
+    const lat = parseFloat(latInput.value);
+    const lon = parseFloat(lonInput.value);
+    if (!isNaN(lat) && !isNaN(lon)) {
+      if (checkBoundsAndSet(lat, lon)) {
+        marker.setLatLng([lat, lon]);
+        map.setView([lat, lon], 9);
+      }
+    }
+    {% if results is not none and results|length == 0 %}
+      showToast("No data found for the selected date and time range.");
+    {% endif %}
+  };
+</script>
 </body>
 </html>

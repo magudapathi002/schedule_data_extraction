@@ -74,15 +74,12 @@ WSGI_APPLICATION = 'wind_forecast_project.wsgi.application'
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.mysql',
-        'NAME': os.environ.get('MYSQL_DATABASE', 'datasets'),
-        'USER': 'root',
-        'HOST': 'host.docker.internal',
-        # 'HOST':'127.0.0.1',
-        # 'HOST':'172.16.7.119',
-        'PASSWORD': 'qwerty@123',
-        # 'PASSWORD': '12345678',
+        'NAME': os.environ.get('MYSQL_DATABASE', 'forecast_data_extraction'),
+        'USER': 'magudapathi002',
+        # 'HOST': 'host.docker.internal',
+        'HOST':'172.16.7.119',
+        'PASSWORD': 'qwerty$123',
         'PORT': '3306',
-        # 'PORT': '8001',
     }
 }
 

@@ -2,16 +2,20 @@ import os
 from datetime import date
 
 from django.db import transaction
-
+from decimal import Decimal, ROUND_HALF_UP
 from wind_data_processing.models import GRIBCycleStatus, WindComponent, Temperature, Humidity, TotalCloudCover, \
     Precipitation, Radiation, WindGust, SunshineDuration, CAPE, Albedo
 
 
 def get_or_create_today_status():
     today = date.today()
-    # today = '2025-05-30'
+    # today = '2025-07-01'
     status_obj, _ = GRIBCycleStatus.objects.get_or_create(date=today)
     return status_obj
+
+
+def round_half_up(value, decimals):
+    return str(Decimal(value).quantize(Decimal('1.' + '0' * decimals), rounding=ROUND_HALF_UP))
 
 
 
